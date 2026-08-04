@@ -1,0 +1,16 @@
+# --- Основной стек ---
+gigachat>=0.1.35         # GigaChat API (генерация вопросов)
+pdfplumber>=0.11.0       # парсинг PDF-лекций
+streamlit>=1.38.0        # UI для преподавателя
+
+# --- Экспорт ---
+openpyxl>=3.1.0          # экспорт в Excel
+lxml>=5.2.0              # сборка QTI (XML)
+
+# --- Утилиты ---
+python-dotenv>=1.0.0     # загрузка GIGACHAT_CREDENTIALS из .env
+pydantic>=2.8.0          # валидация схемы вопросов
+
+# --- Тесты (dev) ---
+pytest>=8.3.0
+reportlab>=4.2.0         # только для генерации тестовых PDF в tests/

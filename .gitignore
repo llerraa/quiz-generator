@@ -1,0 +1,25 @@
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Данные пользователей (загруженные лекции, сгенерированные тесты)
+data/uploads/
+data/output/
+!data/sample/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
