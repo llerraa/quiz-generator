@@ -26,6 +26,7 @@ class MultipleChoiceQuestion(BaseModel):
     question: str
     options: list[str] = Field(min_length=2, max_length=6)
     correct_index: int  # индекс правильного варианта в списке options (с 0)
+    explanation: str | None = None  # объяснение от GigaChat — для быстрой проверки человеком
     source_pages: list[int] = Field(default_factory=list)
 
 

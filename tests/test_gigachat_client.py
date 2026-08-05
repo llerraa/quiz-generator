@@ -9,6 +9,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.llm.gigachat_client import (
     GigaChatClient,
@@ -22,7 +23,18 @@ from src.llm.gigachat_client import (
 )
 from src.models import MatchingQuestion, MultipleChoiceQuestion, QuestionType, TrueFalseQuestion
 
-
+def test_generated_mcq_rejects_out_of_range_correct_index():
+    # Реальный кейс из практики: GigaChat вернул correct_index=3 при трёх
+    # вариантах (валидные индексы 0-2) — такой ответ указывает "в никуда"
+    # и должен отклоняться на этапе валидации, а не доходить до преподавателя.
+    with pytest.raises(ValidationError):
+        _GeneratedMCQ(
+            question="Тест?",
+            options=["A", "B", "C"],
+            explanation="Тестовое объяснение",
+            correct_index=3,
+        )
+        
 def test_client_init_raises_without_credentials(monkeypatch):
     monkeypatch.setattr("src.llm.gigachat_client.Config.GIGACHAT_CREDENTIALS", None)
     with pytest.raises(RuntimeError):
@@ -30,7 +42,12 @@ def test_client_init_raises_without_credentials(monkeypatch):
 
 
 def test_to_app_model_converts_multiple_choice():
-    item = _GeneratedMCQ(question="Что такое ReLU?", options=["Функция активации", "Тип слоя"], correct_index=0)
+    item = _GeneratedMCQ(
+        question="Что такое ReLU?",
+        options=["Функция активации", "Тип слоя"],
+        explanation="ReLU относится к функциям активации по определению из лекции.",
+        correct_index=0,
+    )
     result = GigaChatClient._to_app_model(item, QuestionType.MULTIPLE_CHOICE, source_pages=[2])
 
     assert isinstance(result, MultipleChoiceQuestion)
@@ -76,8 +93,8 @@ def test_generate_questions_uses_chat_parse_and_converts_results(mock_gigachat_c
 
     fake_parsed = _GeneratedMCQList(
         questions=[
-            _GeneratedMCQ(question="Вопрос 1?", options=["A", "B"], correct_index=0),
-            _GeneratedMCQ(question="Вопрос 2?", options=["C", "D"], correct_index=1),
+            _GeneratedMCQ(question="Вопрос 1?", options=["A", "B"], explanation="Тестовое объяснение 1", correct_index=0),
+            _GeneratedMCQ(question="Вопрос 2?", options=["C", "D"], explanation="Тестовое объяснение 2", correct_index=1),
         ]
     )
 

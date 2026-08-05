@@ -10,7 +10,7 @@ import logging
 
 from gigachat import GigaChat
 from gigachat.models import ChatCompletionRequest, ChatMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.config import Config
 from src.models import (
@@ -33,7 +33,24 @@ logger = logging.getLogger(__name__)
 class _GeneratedMCQ(BaseModel):
     question: str
     options: list[str] = Field(min_length=2, max_length=6)
+    # Явно просим объяснение ДО номера ответа — важен именно такой порядок полей:
+    # модель заполняет JSON последовательно, и вынужденное рассуждение перед
+    # фиксацией номера снижает количество случаев, когда correct_index указывает
+    # не на тот вариант, который модель сама только что описала как верный.
+    explanation: str = Field(description="Краткое объяснение, какой вариант верный и почему")
     correct_index: int
+
+    @model_validator(mode="after")
+    def _check_correct_index_in_range(self) -> "_GeneratedMCQ":
+        # Раньше это никак не проверялось — GigaChat один раз вернул correct_index=3
+        # при всего трёх вариантах (валидные индексы 0-2), и такой "битый" вопрос
+        # спокойно прошёл бы дальше. Теперь такой ответ отклоняется на этом же этапе.
+        if not 0 <= self.correct_index < len(self.options):
+            raise ValueError(
+                f"correct_index={self.correct_index} вне диапазона options "
+                f"(допустимо 0..{len(self.options) - 1})"
+            )
+        return self
 
 
 class _GeneratedMCQList(BaseModel):
@@ -120,7 +137,18 @@ class GigaChatClient:
                     content=(
                         "Ты помогаешь преподавателю составлять тестовые вопросы по "
                         "материалам лекции. Вопросы должны проверять понимание "
-                        "материала, а не дословное запоминание фраз из текста."
+                        "материала, а не дословное запоминание фраз из текста.\n\n"
+                        "Для вопросов с вариантами ответа (multiple_choice) строго "
+                        "соблюдай разделение полей:\n"
+                        "- Поле 'options' — ТОЛЬКО сами варианты ответа, коротко и по "
+                        "существу. Никаких пояснений, слов «это верно»/«это неверно», "
+                        "комментариев в скобках или спецсимволов разметки внутри "
+                        "options — это готовые варианты для теста, которые увидит "
+                        "студент как есть.\n"
+                        "- Поле 'explanation' — сюда, и только сюда, пиши краткое "
+                        "объяснение: сначала процитируй короткий фрагмент текста "
+                        "лекции, который подтверждает правильный ответ, затем "
+                        "объясни на его основе, какой вариант верный.\n"
                     ),
                 ),
                 ChatMessage(
@@ -140,7 +168,7 @@ class GigaChatClient:
 
         usage = completion.usage
         logger.info(
-            "GigaChat: потрачено токенов — запрос=%s, ответ=%s, всего=%s",
+            "GigaChat usage: input=%s, output=%s, total=%s",
             usage.input_tokens, usage.output_tokens, usage.total_tokens,
         )
 
@@ -156,6 +184,7 @@ class GigaChatClient:
                 question=item.question,
                 options=item.options,
                 correct_index=item.correct_index,
+                explanation=item.explanation,
                 source_pages=source_pages,
             )
         if question_type == QuestionType.TRUE_FALSE:
