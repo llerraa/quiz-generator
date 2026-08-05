@@ -9,3 +9,11 @@ address = "localhost"
 # даже если он анонимный и не содержит данных лекций или ключей.
 [browser]
 gatherUsageStats = false
+
+# Фирменная палитра ИМЭС: оранжевый #FC4D0F, чёрный, белый.
+[theme]
+primaryColor = "#FC4D0F"
+backgroundColor = "#0D0D0D"
+secondaryBackgroundColor = "#1A1A1A"
+textColor = "#FAFAFA"
+font = "sans serif"
