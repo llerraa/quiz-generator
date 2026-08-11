@@ -21,6 +21,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from src.config import Config
+from src.exporters.json_exporter import questions_to_json
 from src.llm.gigachat_client import GigaChatClient
 from src.models import QuestionType
 from src.parsing.chunking import chunk_document
@@ -123,6 +124,19 @@ _CSS = """
 [data-testid="stFileUploaderDropzone"] {
     background: var(--surface) !important;
     border: 1.5px dashed var(--border) !important; border-radius: 14px !important;
+}
+/* Кнопка скачивания — контурный вариант (не залитый), чтобы отличалась
+   от основной кнопки "Сгенерировать" по значимости действия, но осталась
+   в фирменных цветах, а не серой по умолчанию. */
+[data-testid="stDownloadButton"] button {
+    background: transparent !important; color: var(--imes-orange) !important;
+    border: 1.5px solid var(--imes-orange-border) !important;
+    border-radius: 999px !important; padding: 0.5rem 1.6rem !important;
+    font-weight: 700 !important; box-shadow: none !important;
+    transition: all 0.15s ease;
+}
+[data-testid="stDownloadButton"] button:hover {
+    background: var(--imes-orange-soft) !important; border-color: var(--imes-orange) !important;
 }
 /* Баннеры вместо системных зелёного/жёлтого — свои, в фирменных цветах */
 .imes-banner {
@@ -400,3 +414,10 @@ if st.session_state.get("questions"):
         _render_question_card(q, i) for i, q in enumerate(st.session_state["questions"], start=1)
     )
     st.markdown(cards_html, unsafe_allow_html=True)
+
+    st.download_button(
+        label="Скачать в JSON",
+        data=questions_to_json(st.session_state["questions"]),
+        file_name="quiz_questions.json",
+        mime="application/json",
+    )

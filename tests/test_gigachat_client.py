@@ -23,6 +23,20 @@ from src.llm.gigachat_client import (
 )
 from src.models import MatchingQuestion, MultipleChoiceQuestion, QuestionType, TrueFalseQuestion
 
+def test_generated_matching_rejects_identical_right_values():
+    # Реальный кейс из практики: все 4 пары указывали на один и тот же ответ
+    # ("Технологии нейронных сетей") — формально валидно, но бессмысленно
+    # как задание на сопоставление.
+    with pytest.raises(ValidationError):
+        _GeneratedMatching(
+            instruction="Тест",
+            pairs=[
+                _GeneratedMatchingPair(left="A", right="Одно и то же"),
+                _GeneratedMatchingPair(left="B", right="Одно и то же"),
+                _GeneratedMatchingPair(left="C", right="одно и то же"),  # регистр не спасает
+            ],
+        )
+        
 def test_generated_mcq_rejects_out_of_range_correct_index():
     # Реальный кейс из практики: GigaChat вернул correct_index=3 при трёх
     # вариантах (валидные индексы 0-2) — такой ответ указывает "в никуда"

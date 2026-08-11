@@ -75,6 +75,19 @@ class _GeneratedMatching(BaseModel):
     instruction: str
     pairs: list[_GeneratedMatchingPair] = Field(min_length=2)
 
+    @model_validator(mode="after")
+    def _check_pairs_are_differentiated(self) -> "_GeneratedMatching":
+        # Реальный кейс из практики: GigaChat сгенерировал 4 пары, у каждой
+        # справа один и тот же ответ ("Технологии нейронных сетей") — формально
+        # валидные данные, но бессмысленное задание: сопоставлять нечего.
+        rights = [p.right.strip().lower() for p in self.pairs]
+        if len(set(rights)) == 1:
+            raise ValueError(
+                "Все пары указывают на один и тот же вариант справа — "
+                "такое соответствие не проверяет реальные знания."
+            )
+        return self
+
 
 class _GeneratedMatchingList(BaseModel):
     questions: list[_GeneratedMatching]
@@ -149,6 +162,14 @@ class GigaChatClient:
                         "объяснение: сначала процитируй короткий фрагмент текста "
                         "лекции, который подтверждает правильный ответ, затем "
                         "объясни на его основе, какой вариант верный.\n"
+                        "- Поле 'correct_index' заполняй в конце, на основе своего "
+                        "explanation.\n\n"
+                        "Для вопросов на соответствие (matching): каждая пара должна "
+                        "связывать РАЗНЫЕ понятия с РАЗНЫМИ, не повторяющимися ответами "
+                        "справа. Если несколько элементов слева описываются одним и тем "
+                        "же общим ответом справа — это не задание на соответствие, "
+                        "переформулируй так, чтобы у каждой пары был свой, отличающийся "
+                        "от остальных правый вариант."
                     ),
                 ),
                 ChatMessage(
