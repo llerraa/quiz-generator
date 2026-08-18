@@ -21,6 +21,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from src.config import Config
+from src.exporters.excel_exporter import questions_to_excel_bytes
 from src.exporters.json_exporter import questions_to_json
 from src.llm.gigachat_client import GigaChatClient
 from src.models import QuestionType
@@ -299,6 +300,17 @@ with st.container(border=True):
     uploaded_file = st.file_uploader(
         "PDF лекции", type="pdf", label_visibility="collapsed"
     )
+    with st.expander("Лекция в PowerPoint, а не в PDF? Покажу, как быстро перевести"):
+        st.markdown(
+            "**В PowerPoint (Windows и Mac):**\n"
+            "1. Откройте презентацию\n"
+            "2. **Файл → Экспорт** (или **Сохранить как**)\n"
+            "3. В качестве формата выберите **PDF**\n"
+            "4. Сохраните — готово, займёт несколько секунд\n\n"
+            "**В Keynote (Mac):**\n"
+            "1. **Файл → Экспорт в → PDF**\n\n"
+            "Затем просто загрузите получившийся PDF-файл сюда."
+        )
 
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -415,9 +427,18 @@ if st.session_state.get("questions"):
     )
     st.markdown(cards_html, unsafe_allow_html=True)
 
-    st.download_button(
-        label="Скачать в JSON",
-        data=questions_to_json(st.session_state["questions"]),
-        file_name="quiz_questions.json",
-        mime="application/json",
-    )
+    col_dl1, col_dl2, _ = st.columns([1, 1, 3])
+    with col_dl1:
+        st.download_button(
+            label="Скачать в JSON",
+            data=questions_to_json(st.session_state["questions"]),
+            file_name="quiz_questions.json",
+            mime="application/json",
+        )
+    with col_dl2:
+        st.download_button(
+            label="Скачать в Excel",
+            data=questions_to_excel_bytes(st.session_state["questions"]),
+            file_name="quiz_questions.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )

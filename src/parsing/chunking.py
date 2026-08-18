@@ -16,6 +16,24 @@ from src.parsing.pdf_parser import ParsedDocument, PageContent
 # страницы добавляются в чанк, пока не превысим это значение.
 DEFAULT_CHUNK_SIZE = 3000
 
+# Служебные слайды (прощание, финальная благодарность) — не пустые (поэтому
+# likely_scanned их не ловит), но и не несут учебного содержания. Реальный
+# случай из практики: GigaChat сгенерировал по такому слайду вопрос
+# "Как завершить лекцию?" с ответом "Сказать «Спасибо за внимание»" —
+# формально валидный вопрос, но не проверяющий никаких знаний по теме.
+_CLOSING_SLIDE_MARKERS = [
+    "спасибо за внимание",
+    "успехов в обучении",
+    "спасибо за просмотр",
+    "конец лекции",
+]
+
+
+def _is_closing_slide(text: str) -> bool:
+    """Эвристика: слайд похож на служебную концовку презентации."""
+    normalized = text.lower()
+    return any(marker in normalized for marker in _CLOSING_SLIDE_MARKERS)
+
 
 @dataclass
 class TextChunk:
@@ -34,8 +52,9 @@ def chunk_document(
     """
     Группирует страницы документа в чанки заданного целевого размера.
 
-    Страницы, помеченные как вероятный скан (likely_scanned) или полностью
-    пустые, пропускаются — из них нельзя сгенерировать осмысленные вопросы.
+    Страницы, помеченные как вероятный скан (likely_scanned), полностью
+    пустые, или похожие на служебные "прощальные" слайды, пропускаются —
+    из них нельзя сгенерировать осмысленные вопросы.
 
     Args:
         document: результат parse_pdf().
@@ -45,7 +64,8 @@ def chunk_document(
         Список TextChunk — каждый содержит одну или несколько соседних страниц.
     """
     usable_pages = [
-        p for p in document.pages if not p.likely_scanned and p.text.strip()
+        p for p in document.pages
+        if not p.likely_scanned and p.text.strip() and not _is_closing_slide(p.text)
     ]
 
     chunks: list[TextChunk] = []

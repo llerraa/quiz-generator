@@ -12,6 +12,21 @@ def parsed_sample(tmp_path):
     pdf_path = make_sample_pdf(tmp_path / "test_lecture.pdf")
     return parse_pdf(pdf_path)
 
+def test_chunk_document_skips_closing_slides(parsed_sample):
+    from src.parsing.pdf_parser import PageContent, ParsedDocument
+
+    doc_with_closing = ParsedDocument(
+        source_path="test",
+        pages=[
+            PageContent(page_number=1, text="Настоящий учебный текст лекции про риски.", char_count=42, likely_scanned=False),
+            PageContent(page_number=2, text="СПАСИБО ЗА ВНИМАНИЕ! Успехов в обучении!", char_count=41, likely_scanned=False),
+        ],
+    )
+    chunks = chunk_document(doc_with_closing)
+    all_pages_used = [p for chunk in chunks for p in chunk.page_numbers]
+    assert 2 not in all_pages_used
+    assert 1 in all_pages_used
+
 
 def test_chunk_document_skips_likely_scanned_pages(parsed_sample):
     chunks = chunk_document(parsed_sample)
