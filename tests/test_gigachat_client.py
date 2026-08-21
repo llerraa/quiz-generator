@@ -23,6 +23,35 @@ from src.llm.gigachat_client import (
 )
 from src.models import MatchingQuestion, MultipleChoiceQuestion, QuestionType, TrueFalseQuestion
 
+@patch("src.llm.gigachat_client.GigaChat")
+def test_extract_questions_finds_existing_questions(mock_gigachat_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.gigachat_client.Config.GIGACHAT_CREDENTIALS", "fake-creds")
+
+    mock_giga_instance = MagicMock()
+    mock_gigachat_cls.return_value = mock_giga_instance
+
+    fake_completion = MagicMock()
+    fake_completion.usage.input_tokens = 50
+    fake_completion.usage.output_tokens = 20
+    fake_completion.usage.total_tokens = 70
+
+    fake_parsed = _GeneratedMCQList(
+        questions=[
+            _GeneratedMCQ(question="Уже готовый вопрос?", options=["A", "B"], explanation="из документа", correct_index=0),
+        ]
+    )
+    mock_giga_instance.chat.parse.return_value = (fake_completion, fake_parsed)
+
+    client = GigaChatClient()
+    result = client.extract_questions(
+        text="1. Уже готовый вопрос? а) A (верно) б) B",
+        question_type=QuestionType.MULTIPLE_CHOICE,
+    )
+
+    assert len(result) == 1
+    assert isinstance(result[0], MultipleChoiceQuestion)
+    mock_giga_instance.chat.parse.assert_called_once()
+    
 def test_generated_matching_rejects_identical_right_values():
     # Реальный кейс из практики: все 4 пары указывали на один и тот же ответ
     # ("Технологии нейронных сетей") — формально валидно, но бессмысленно

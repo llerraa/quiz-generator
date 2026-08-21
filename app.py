@@ -4,12 +4,13 @@ Streamlit-интерфейс для преподавателя: загрузка
 
 Запуск: `streamlit run app.py`
 
-TODO (следующие этапы): экспорт в JSON/Excel/QTI (src/exporters — пока заглушки).
+TODO: экспорт в QTI (src/exporters/qti_exporter.py — пока заглушка).
 """
 import html as html_lib
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import streamlit as st
 
@@ -26,6 +27,7 @@ from src.exporters.json_exporter import questions_to_json
 from src.llm.gigachat_client import GigaChatClient
 from src.models import QuestionType
 from src.parsing.chunking import chunk_document
+from src.parsing.docx_parser import parse_docx
 from src.parsing.pdf_parser import parse_pdf
 
 st.set_page_config(page_title="Генератор тестов из лекций", page_icon="📝", layout="wide")
@@ -37,9 +39,6 @@ _TYPE_LABELS_RU = {
 }
 
 # --- Фирменные стили ИМЭС (оранжевый/чёрный/белый) ---
-# Системный шрифт (-apple-system = SF Pro на macOS) выбран осознанно, а не
-# шрифт из Google Fonts — чтобы приложение не зависело от доступности
-# внешнего CDN из РФ, тот же принцип, что и во всём остальном проекте.
 _CSS = """
 <style>
 :root {
@@ -51,7 +50,6 @@ _CSS = """
     --text: #F5F5F5;
     --text-muted: #8F8F94;
 }
-/* Оранжевое свечение фоном за шапкой — фирменный акцент, не декор ради декора */
 .stApp {
     background:
         radial-gradient(1100px circle at 8% -15%, rgba(252,77,15,0.30) 0%, rgba(252,77,15,0) 48%),
@@ -113,9 +111,6 @@ _CSS = """
     background: #FF6B3D !important; transform: translateY(-1px);
     box-shadow: 0 8px 22px rgba(252, 77, 15, 0.4);
 }
-/* Кнопка "Browse files" внутри загрузчика — НЕ трогаем общими стилями кнопок,
-   иначе текст/иконка внутри неё накладываются друг на друга (реальный баг,
-   пойманный на скриншоте). Отдельный, более скромный стиль специально для неё. */
 [data-testid="stFileUploader"] button {
     border-radius: 8px !important;
     padding: 0.4rem 1rem !important;
@@ -126,9 +121,6 @@ _CSS = """
     background: var(--surface) !important;
     border: 1.5px dashed var(--border) !important; border-radius: 14px !important;
 }
-/* Кнопка скачивания — контурный вариант (не залитый), чтобы отличалась
-   от основной кнопки "Сгенерировать" по значимости действия, но осталась
-   в фирменных цветах, а не серой по умолчанию. */
 [data-testid="stDownloadButton"] button {
     background: transparent !important; color: var(--imes-orange) !important;
     border: 1.5px solid var(--imes-orange-border) !important;
@@ -138,19 +130,6 @@ _CSS = """
 }
 [data-testid="stDownloadButton"] button:hover {
     background: var(--imes-orange-soft) !important; border-color: var(--imes-orange) !important;
-}
-/* Баннеры вместо системных зелёного/жёлтого — свои, в фирменных цветах */
-.imes-banner {
-    border-radius: 12px; padding: 0.75rem 1.1rem; margin: 0.6rem 0;
-    font-size: 0.9rem; line-height: 1.5;
-}
-.imes-banner-info {
-    background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
-}
-.imes-banner-info strong { color: var(--text); }
-.imes-banner-warn {
-    background: var(--imes-orange-soft); border: 1px solid var(--imes-orange-border);
-    color: var(--text);
 }
 .imes-qcard {
     background: var(--surface); border: 1px solid var(--border);
@@ -196,11 +175,6 @@ st.markdown(_CSS, unsafe_allow_html=True)
 
 def _esc(text: str) -> str:
     return html_lib.escape(text)
-
-
-def _banner(text: str, kind: str = "info") -> None:
-    """Баннер в фирменных цветах вместо системных зелёного/жёлтого st.success/st.warning."""
-    st.markdown(f"<div class='imes-banner imes-banner-{kind}'>{text}</div>", unsafe_allow_html=True)
 
 
 def _distribute_count(total: int, n_chunks: int) -> list[int]:
@@ -289,129 +263,244 @@ if not Config.GIGACHAT_CREDENTIALS:
     )
     st.stop()
 
+_MODE_GENERATE = "Сгенерировать вопросы из лекции"
+_MODE_EXTRACT = "Привести готовые вопросы к формату"
 
-# --- Шаг 1. Загрузка PDF ---
-st.markdown(
-    "<div class='imes-step'><span class='imes-step-badge'>1</span>"
-    "<span class='imes-step-title'>Загрузите лекцию</span></div>",
-    unsafe_allow_html=True,
+mode = st.radio(
+    "Что делаем?",
+    [_MODE_GENERATE, _MODE_EXTRACT],
+    horizontal=True,
 )
-with st.container(border=True):
-    uploaded_file = st.file_uploader(
-        "PDF лекции", type="pdf", label_visibility="collapsed"
-    )
-    with st.expander("Лекция в PowerPoint, а не в PDF? Покажу, как быстро перевести"):
-        st.markdown(
-            "**В PowerPoint (Windows и Mac):**\n"
-            "1. Откройте презентацию\n"
-            "2. **Файл → Экспорт** (или **Сохранить как**)\n"
-            "3. В качестве формата выберите **PDF**\n"
-            "4. Сохраните — готово, займёт несколько секунд\n\n"
-            "**В Keynote (Mac):**\n"
-            "1. **Файл → Экспорт в → PDF**\n\n"
-            "Затем просто загрузите получившийся PDF-файл сюда."
-        )
+st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
-if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(uploaded_file.read())
-        tmp_path = tmp.name
 
-    try:
-        document = parse_pdf(tmp_path)
-    finally:
-        os.unlink(tmp_path)  # временный файл больше не нужен — весь текст уже в document
-
-    chunks = chunk_document(document)
-
-    _banner(
-        f"Загружено: {len(document.pages)} стр., "
-        f"{len(chunks)} смысловых блок(ов) текста для генерации",
-        kind="info",
-    )
-    if document.has_scanned_pages:
-        _banner(
-            "Часть страниц похожа на сканы без текстового слоя — "
-            "вопросы по ним не будут сгенерированы (см. README).",
-            kind="warn",
-        )
-
-    if not chunks:
-        st.error("Не удалось извлечь текст из PDF — проверьте файл.")
-        st.stop()
-
-    # --- Шаг 2. Настройка количества вопросов по типам ---
+if mode == _MODE_GENERATE:
+    # --- Шаг 1. Загрузка PDF ---
     st.markdown(
-        "<div class='imes-step'><span class='imes-step-badge'>2</span>"
-        "<span class='imes-step-title'>Сколько вопросов сгенерировать</span></div>",
+        "<div class='imes-step'><span class='imes-step-badge'>1</span>"
+        "<span class='imes-step-title'>Загрузите лекцию</span></div>",
         unsafe_allow_html=True,
     )
     with st.container(border=True):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            n_mcq = st.number_input(
-                _TYPE_LABELS_RU[QuestionType.MULTIPLE_CHOICE], min_value=0, max_value=20, value=3
-            )
-        with col2:
-            n_tf = st.number_input(
-                _TYPE_LABELS_RU[QuestionType.TRUE_FALSE], min_value=0, max_value=20, value=3
-            )
-        with col3:
-            n_matching = st.number_input(
-                _TYPE_LABELS_RU[QuestionType.MATCHING], min_value=0, max_value=20, value=2
+        uploaded_file = st.file_uploader(
+            "PDF лекции", type="pdf", label_visibility="collapsed"
+        )
+        with st.expander("Лекция в PowerPoint, а не в PDF? Покажу, как быстро перевести"):
+            st.markdown(
+                "**В PowerPoint (Windows и Mac):**\n"
+                "1. Откройте презентацию\n"
+                "2. **Файл → Экспорт** (или **Сохранить как**)\n"
+                "3. В качестве формата выберите **PDF**\n"
+                "4. Сохраните — готово, займёт несколько секунд\n\n"
+                "**В Keynote (Mac):**\n"
+                "1. **Файл → Экспорт в → PDF**\n\n"
+                "Затем просто загрузите получившийся PDF-файл сюда."
             )
 
-    # --- Шаг 3. Генерация ---
+    if uploaded_file is not None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.read())
+            tmp_path = tmp.name
+
+        try:
+            document = parse_pdf(tmp_path)
+        finally:
+            os.unlink(tmp_path)  # временный файл больше не нужен — весь текст уже в document
+
+        chunks = chunk_document(document)
+
+        st.markdown(
+            f"<div class='imes-disclaimer'>Загружено: {len(document.pages)} стр., "
+            f"{len(chunks)} смысловых блок(ов) текста для генерации</div>",
+            unsafe_allow_html=True,
+        )
+        if document.has_scanned_pages:
+            st.markdown(
+                "<div class='imes-disclaimer'>Часть страниц похожа на сканы без текстового "
+                "слоя — вопросы по ним не будут сгенерированы (см. README).</div>",
+                unsafe_allow_html=True,
+            )
+
+        if not chunks:
+            st.error("Не удалось извлечь текст из PDF — проверьте файл.")
+            st.stop()
+
+        # --- Шаг 2. Настройка количества вопросов по типам ---
+        st.markdown(
+            "<div class='imes-step'><span class='imes-step-badge'>2</span>"
+            "<span class='imes-step-title'>Сколько вопросов сгенерировать</span></div>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                n_mcq = st.number_input(_TYPE_LABELS_RU[QuestionType.MULTIPLE_CHOICE], min_value=0, max_value=20, value=3)
+            with col2:
+                n_tf = st.number_input(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], min_value=0, max_value=20, value=3)
+            with col3:
+                n_matching = st.number_input(_TYPE_LABELS_RU[QuestionType.MATCHING], min_value=0, max_value=20, value=2)
+
+        # --- Шаг 3. Генерация ---
+        st.markdown(
+            "<div class='imes-step'><span class='imes-step-badge'>3</span>"
+            "<span class='imes-step-title'>Генерация</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Сгенерировать вопросы", type="primary"):
+            counts = {
+                QuestionType.MULTIPLE_CHOICE: n_mcq,
+                QuestionType.TRUE_FALSE: n_tf,
+                QuestionType.MATCHING: n_matching,
+            }
+            active_types = {qt: c for qt, c in counts.items() if c > 0}
+
+            if not active_types:
+                st.warning("Выберите хотя бы один тип вопросов с количеством больше 0.")
+            else:
+                client = GigaChatClient()
+                all_questions = []
+                total_steps = len(active_types) * len(chunks)
+                step = 0
+                progress = st.progress(0.0, text="Генерируем вопросы...")
+
+                for question_type, total_count in active_types.items():
+                    per_chunk = _distribute_count(total_count, len(chunks))
+                    for chunk, chunk_count in zip(chunks, per_chunk):
+                        step += 1
+                        progress.progress(
+                            step / total_steps,
+                            text=f"{_TYPE_LABELS_RU[question_type]}: страницы {chunk.page_numbers}...",
+                        )
+                        if chunk_count == 0:
+                            continue
+                        try:
+                            questions = client.generate_questions(
+                                text=chunk.text,
+                                question_type=question_type,
+                                count=chunk_count,
+                                source_pages=chunk.page_numbers,
+                            )
+                            all_questions.extend(questions)
+                        except Exception as exc:
+                            st.error(
+                                f"Ошибка генерации ({_TYPE_LABELS_RU[question_type]}, "
+                                f"страницы {chunk.page_numbers}): {exc}"
+                            )
+
+                progress.empty()
+                st.session_state["questions"] = all_questions
+                st.success(f"Готово! Сгенерировано вопросов: {len(all_questions)}")
+
+else:
+    # --- Шаг 1. Загрузка файла с готовыми вопросами ---
     st.markdown(
-        "<div class='imes-step'><span class='imes-step-badge'>3</span>"
-        "<span class='imes-step-title'>Генерация</span></div>",
+        "<div class='imes-step'><span class='imes-step-badge'>1</span>"
+        "<span class='imes-step-title'>Загрузите файл с готовыми вопросами</span></div>",
         unsafe_allow_html=True,
     )
+    with st.container(border=True):
+        uploaded_existing = st.file_uploader(
+            "Файл с вопросами", type=["pdf", "docx", "txt"], label_visibility="collapsed",
+        )
+        st.markdown(
+            "<div class='imes-disclaimer'>Поддерживаются PDF, Word (.docx) и обычный "
+            "текст (.txt). Если в исходном docx/pdf преподавателя правильный ответ "
+            "помечен жирным шрифтом или подчёркиванием, а не текстом (например, "
+            "явным «Правильный ответ: Б» или звёздочкой) — наш парсер это не "
+            "увидит, потому что извлекает обычный текст без форматирования.</div>",
+            unsafe_allow_html=True,
+        )
 
-    if st.button("Сгенерировать вопросы", type="primary"):
-        counts = {
-            QuestionType.MULTIPLE_CHOICE: n_mcq,
-            QuestionType.TRUE_FALSE: n_tf,
-            QuestionType.MATCHING: n_matching,
-        }
-        active_types = {qt: c for qt, c in counts.items() if c > 0}
+    if uploaded_existing is not None:
+        suffix = Path(uploaded_existing.name).suffix.lower()
+        raw_bytes = uploaded_existing.read()
 
-        if not active_types:
-            st.warning("Выберите хотя бы один тип вопросов с количеством больше 0.")
-        else:
-            client = GigaChatClient()
-            all_questions = []
-            total_steps = len(active_types) * len(chunks)
-            step = 0
-            progress = st.progress(0.0, text="Генерируем вопросы...")
+        if suffix == ".pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+            try:
+                existing_text = parse_pdf(tmp_path).full_text
+            finally:
+                os.unlink(tmp_path)
+        elif suffix == ".docx":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+            try:
+                existing_text = parse_docx(tmp_path)
+            finally:
+                os.unlink(tmp_path)
+        else:  # .txt
+            existing_text = raw_bytes.decode("utf-8", errors="replace")
 
-            for question_type, total_count in active_types.items():
-                per_chunk = _distribute_count(total_count, len(chunks))
-                for chunk, chunk_count in zip(chunks, per_chunk):
-                    step += 1
+        if not existing_text.strip():
+            st.error("Не удалось извлечь текст из файла — проверьте, что в нём есть текстовый слой.")
+            st.stop()
+
+        st.markdown(
+            f"<div class='imes-disclaimer'>Извлечено {len(existing_text)} символов текста.</div>",
+            unsafe_allow_html=True,
+        )
+
+        # --- Шаг 2. Какие типы вопросов искать ---
+        st.markdown(
+            "<div class='imes-step'><span class='imes-step-badge'>2</span>"
+            "<span class='imes-step-title'>Какие типы вопросов искать</span></div>",
+            unsafe_allow_html=True,
+        )
+        with st.container(border=True):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                find_mcq = st.checkbox(_TYPE_LABELS_RU[QuestionType.MULTIPLE_CHOICE], value=True)
+            with col2:
+                find_tf = st.checkbox(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], value=True)
+            with col3:
+                find_matching = st.checkbox(_TYPE_LABELS_RU[QuestionType.MATCHING], value=True)
+
+        # --- Шаг 3. Извлечение ---
+        st.markdown(
+            "<div class='imes-step'><span class='imes-step-badge'>3</span>"
+            "<span class='imes-step-title'>Извлечение</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Извлечь вопросы", type="primary"):
+            types_to_find = [
+                qt for qt, enabled in [
+                    (QuestionType.MULTIPLE_CHOICE, find_mcq),
+                    (QuestionType.TRUE_FALSE, find_tf),
+                    (QuestionType.MATCHING, find_matching),
+                ] if enabled
+            ]
+
+            if not types_to_find:
+                st.warning("Выберите хотя бы один тип вопросов для поиска.")
+            else:
+                client = GigaChatClient()
+                all_questions = []
+                progress = st.progress(0.0, text="Ищем вопросы...")
+
+                for i, question_type in enumerate(types_to_find, start=1):
                     progress.progress(
-                        step / total_steps,
-                        text=f"{_TYPE_LABELS_RU[question_type]}: страницы {chunk.page_numbers}...",
+                        i / len(types_to_find),
+                        text=f"Ищем: {_TYPE_LABELS_RU[question_type]}...",
                     )
-                    if chunk_count == 0:
-                        continue
                     try:
-                        questions = client.generate_questions(
-                            text=chunk.text,
-                            question_type=question_type,
-                            count=chunk_count,
-                            source_pages=chunk.page_numbers,
+                        questions = client.extract_questions(
+                            text=existing_text, question_type=question_type
                         )
                         all_questions.extend(questions)
                     except Exception as exc:
-                        st.error(
-                            f"Ошибка генерации ({_TYPE_LABELS_RU[question_type]}, "
-                            f"страницы {chunk.page_numbers}): {exc}"
-                        )
+                        st.error(f"Ошибка извлечения ({_TYPE_LABELS_RU[question_type]}): {exc}")
 
-            progress.empty()
-            st.session_state["questions"] = all_questions
-            st.success(f"Готово! Сгенерировано вопросов: {len(all_questions)}")
+                progress.empty()
+                st.session_state["questions"] = all_questions
+                if all_questions:
+                    st.success(f"Готово! Найдено вопросов: {len(all_questions)}")
+                else:
+                    st.warning("Вопросов выбранных типов в файле не нашлось.")
 
 
 # --- Просмотр результата ---

@@ -2,7 +2,7 @@
 Клиент GigaChat API для генерации тестовых вопросов из текста лекции.
 
 Использует встроенную в GigaChat SDK поддержку structured output
-(giga.chat_parse с response_format=Pydantic-модель) — SDK сам строит
+(giga.chat.parse с response_format=Pydantic-модель) — SDK сам строит
 JSON Schema из модели и сам разбирает ответ обратно в объект, поэтому
 не приходится вручную парсить сырой JSON и ловить опечатки модели.
 """
@@ -43,8 +43,7 @@ class _GeneratedMCQ(BaseModel):
     @model_validator(mode="after")
     def _check_correct_index_in_range(self) -> "_GeneratedMCQ":
         # Раньше это никак не проверялось — GigaChat один раз вернул correct_index=3
-        # при всего трёх вариантах (валидные индексы 0-2), и такой "битый" вопрос
-        # спокойно прошёл бы дальше. Теперь такой ответ отклоняется на этом же этапе.
+        # при всего трёх вариантах (валидные индексы 0-2) — такой ответ отклоняется.
         if not 0 <= self.correct_index < len(self.options):
             raise ValueError(
                 f"correct_index={self.correct_index} вне диапазона options "
@@ -78,8 +77,8 @@ class _GeneratedMatching(BaseModel):
     @model_validator(mode="after")
     def _check_pairs_are_differentiated(self) -> "_GeneratedMatching":
         # Реальный кейс из практики: GigaChat сгенерировал 4 пары, у каждой
-        # справа один и тот же ответ ("Технологии нейронных сетей") — формально
-        # валидные данные, но бессмысленное задание: сопоставлять нечего.
+        # справа один и тот же ответ — формально валидные данные, но
+        # бессмысленное задание: сопоставлять нечего.
         rights = [p.right.strip().lower() for p in self.pairs]
         if len(set(rights)) == 1:
             raise ValueError(
@@ -115,8 +114,6 @@ class GigaChatClient:
             credentials=Config.GIGACHAT_CREDENTIALS,
             scope=Config.GIGACHAT_SCOPE,
             model=Config.GIGACHAT_MODEL,
-            # Сертификат Минцифры на этапе прототипа не устанавливаем —
-            # см. README про TLS-верификацию при переходе в продакшен.
             verify_ssl_certs=False,
         )
 
@@ -129,15 +126,6 @@ class GigaChatClient:
     ) -> list[Question]:
         """
         Генерирует список вопросов одного типа по тексту (обычно — одного чанка).
-
-        Args:
-            text: текст лекции, из которого нужно составить вопросы.
-            question_type: какой тип вопросов генерировать.
-            count: сколько вопросов сгенерировать (не больше Config.MAX_QUESTIONS_PER_REQUEST).
-            source_pages: номера страниц-источников — прокидываются в результат как есть.
-
-        Returns:
-            Список объектов нужного типа (см. src/models.py).
         """
         count = min(count, Config.MAX_QUESTIONS_PER_REQUEST)
         schema_cls = _SCHEMA_BY_TYPE[question_type]
@@ -157,7 +145,12 @@ class GigaChatClient:
                         "существу. Никаких пояснений, слов «это верно»/«это неверно», "
                         "комментариев в скобках или спецсимволов разметки внутри "
                         "options — это готовые варианты для теста, которые увидит "
-                        "студент как есть.\n"
+                        "студент как есть. Варианты должны быть ВЗАИМОИСКЛЮЧАЮЩИМИ — "
+                        "верным должен быть ровно один из них, а остальные — явно "
+                        "неверными или менее точными, а не другими равнозначными "
+                        "правильными примерами из той же категории (например, если "
+                        "несколько вариантов — просто разные элементы одного и того "
+                        "же списка из лекции, такой вопрос некорректен).\n"
                         "- Поле 'explanation' — сюда, и только сюда, пиши краткое "
                         "объяснение: сначала процитируй короткий фрагмент текста "
                         "лекции, который подтверждает правильный ответ, затем "
@@ -182,14 +175,71 @@ class GigaChatClient:
             ],
         )
 
-        # Используем giga.chat.parse (основной эндпоинт), а не giga.chat_parse —
-        # последний помечен в SDK как Beta и обращается к отдельному "резервному"
-        # адресу API, которого пока нет на боевом сервере GigaChat (ловили 404).
         completion, parsed = self._giga.chat.parse(chat_request, response_format=schema_cls, strict=True)
 
         usage = completion.usage
         logger.info(
             "GigaChat usage: input=%s, output=%s, total=%s",
+            usage.input_tokens, usage.output_tokens, usage.total_tokens,
+        )
+
+        return [
+            self._to_app_model(item, question_type, source_pages or [])
+            for item in parsed.questions
+        ]
+
+    def extract_questions(
+        self,
+        text: str,
+        question_type: QuestionType,
+        source_pages: list[int] | None = None,
+    ) -> list[Question]:
+        """
+        Извлекает уже существующие в тексте вопросы одного типа — НЕ генерирует
+        новые. Используется, когда преподаватель загружает готовый файл со
+        своими вопросами (docx/pdf/текст), а не лекцию для генерации с нуля.
+
+        Args:
+            text: текст документа, в котором могут быть готовые вопросы.
+            question_type: какой тип вопросов искать и извлекать.
+            source_pages: номера страниц-источников — прокидываются как есть.
+
+        Returns:
+            Список найденных вопросов нужного типа. Пустой список, если в
+            тексте вопросов такого типа не нашлось — это не ошибка.
+        """
+        schema_cls = _SCHEMA_BY_TYPE[question_type]
+        type_description = _TYPE_DESCRIPTION_RU[question_type]
+
+        chat_request = ChatCompletionRequest(
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "Ты помогаешь преподавателю привести уже готовые тестовые "
+                        "вопросы к структурированному формату. В тексте ниже могут "
+                        f"быть вопросы разных типов — найди среди них ТОЛЬКО вопросы "
+                        f"типа «{type_description}» и извлеки их как есть. НЕ придумывай "
+                        "новых вопросов и не меняй формулировку по существу — только "
+                        "переноси в структуру. Правильный ответ определяй по явным "
+                        "текстовым указаниям в исходном документе (например, пометки "
+                        "«верно», «правильный ответ:», звёздочка рядом с вариантом) — "
+                        "не угадывай, если явного указания нет. Если в тексте нет "
+                        "вопросов такого типа — верни пустой список questions."
+                    ),
+                ),
+                ChatMessage(
+                    role="user",
+                    content=f"Текст с вопросами:\n\n{text}",
+                ),
+            ],
+        )
+
+        completion, parsed = self._giga.chat.parse(chat_request, response_format=schema_cls, strict=True)
+
+        usage = completion.usage
+        logger.info(
+            "GigaChat usage (extract): input=%s, output=%s, total=%s",
             usage.input_tokens, usage.output_tokens, usage.total_tokens,
         )
 
