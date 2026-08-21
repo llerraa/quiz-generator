@@ -93,6 +93,13 @@ _CSS = """
     font-size: 0.98rem; line-height: 1.65; padding: 1rem 1.2rem;
     border-left-width: 4px;
 }
+.imes-warning-white {
+    background: #FFFFFF; border: 1px solid var(--imes-orange-border);
+    border-left: 4px solid var(--imes-orange); border-radius: 10px;
+    padding: 1rem 1.2rem; margin: 0.8rem 0;
+    color: #1A1A1A; font-size: 0.98rem; line-height: 1.65;
+}
+.imes-warning-white strong { color: #000000; }
 .imes-step {
     display: flex; align-items: center; gap: 0.6rem; margin: 1.8rem 0 0.7rem 0;
 }
@@ -288,6 +295,13 @@ with st.container(border=True):
     )
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
+# При смене режима старые результаты больше не относятся к делу (сгенерированные
+# вопросы из лекции — не то же самое, что найденные в чужом файле) — сбрасываем,
+# иначе они молча остаются висеть на экране под новым режимом.
+if st.session_state.get("_active_mode") != mode:
+    st.session_state["questions"] = []
+    st.session_state["_active_mode"] = mode
+
 
 if mode == _MODE_GENERATE:
     # --- Шаг 1. Загрузка PDF ---
@@ -396,7 +410,10 @@ if mode == _MODE_GENERATE:
                                 count=chunk_count,
                                 source_pages=chunk.page_numbers,
                             )
-                            all_questions.extend(questions)
+                            for q in questions:
+                                all_questions.append(
+                                    {"question": q, "source_text": chunk.text, "mode": "generate"}
+                                )
                         except Exception as exc:
                             st.error(
                                 f"Ошибка генерации ({_TYPE_LABELS_RU[question_type]}, "
@@ -506,7 +523,10 @@ else:
                         questions = client.extract_questions(
                             text=existing_text, question_type=question_type
                         )
-                        all_questions.extend(questions)
+                        for q in questions:
+                            all_questions.append(
+                                {"question": q, "source_text": existing_text, "mode": "extract"}
+                            )
                     except Exception as exc:
                         st.error(f"Ошибка извлечения ({_TYPE_LABELS_RU[question_type]}): {exc}")
 
@@ -520,29 +540,65 @@ else:
 
 # --- Просмотр результата ---
 if st.session_state.get("questions"):
+    items = st.session_state["questions"]
     st.markdown(
         f"<div class='imes-step'><span class='imes-step-badge'>4</span>"
-        f"<span class='imes-step-title'>Результат "
-        f"({len(st.session_state['questions'])})</span></div>",
+        f"<span class='imes-step-title'>Результат ({len(items)})</span></div>",
         unsafe_allow_html=True,
     )
-    cards_html = "".join(
-        _render_question_card(q, i) for i, q in enumerate(st.session_state["questions"], start=1)
-    )
-    st.markdown(cards_html, unsafe_allow_html=True)
 
+    for i, item in enumerate(items):
+        st.markdown(_render_question_card(item["question"], i + 1), unsafe_allow_html=True)
+        if item["mode"] == "generate":
+            col_regen, _ = st.columns([1, 4])
+            with col_regen:
+                if st.button("🔄 Перегенерировать", key=f"regen_{i}"):
+                    try:
+                        client = GigaChatClient()
+                        new_questions = client.generate_questions(
+                            text=item["source_text"],
+                            question_type=item["question"].type,
+                            count=1,
+                            source_pages=item["question"].source_pages,
+                        )
+                        if new_questions:
+                            st.session_state["questions"][i] = {
+                                "question": new_questions[0],
+                                "source_text": item["source_text"],
+                                "mode": "generate",
+                            }
+                            st.rerun()
+                        else:
+                            st.warning("Не удалось получить новый вопрос — попробуйте ещё раз.")
+                    except Exception as exc:
+                        st.error(f"Ошибка перегенерации: {exc}")
+
+    st.markdown(
+        "<div class='imes-warning-white'>"
+        "<strong>Перед использованием — перепроверьте вопросы.</strong> ИИ может "
+        "допускать ошибки, особенно в выборе правильного варианта. Обратите "
+        "особое внимание на поле «Объяснение» у вопросов с множественным выбором: "
+        "если там нет связного текста (например, вместо объяснения стоит один "
+        "символ или короткая бессмысленная фраза) — это признак того, что "
+        "правильный ответ стоит проверить вручную, сверившись с исходным "
+        "материалом. Заметили неверный вопрос — воспользуйтесь кнопкой "
+        "«Перегенерировать» рядом с ним.</div>",
+        unsafe_allow_html=True,
+    )
+
+    questions_only = [item["question"] for item in items]
     col_dl1, col_dl2, _ = st.columns([1, 1, 3])
     with col_dl1:
         st.download_button(
             label="Скачать в JSON",
-            data=questions_to_json(st.session_state["questions"]),
+            data=questions_to_json(questions_only),
             file_name="quiz_questions.json",
             mime="application/json",
         )
     with col_dl2:
         st.download_button(
             label="Скачать в Excel",
-            data=questions_to_excel_bytes(st.session_state["questions"]),
+            data=questions_to_excel_bytes(questions_only),
             file_name="quiz_questions.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
