@@ -5,7 +5,8 @@ streamlit>=1.38.0        # UI для преподавателя
 
 # --- Экспорт ---
 openpyxl>=3.1.0          # экспорт в Excel
-lxml>=5.2.0              # сборка QTI (XML)
+lxml>=5.2.0              # сборка QTI (XML, следующий этап)
+python-docx>=1.1.0       # чтение готовых вопросов из Word-файлов
 
 # --- Утилиты ---
 python-dotenv>=1.0.0     # загрузка GIGACHAT_CREDENTIALS из .env

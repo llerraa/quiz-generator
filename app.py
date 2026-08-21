@@ -89,6 +89,10 @@ _CSS = """
     color: var(--text-muted); font-size: 0.82rem; line-height: 1.5;
 }
 .imes-disclaimer strong { color: var(--text); }
+.imes-disclaimer-lg {
+    font-size: 0.98rem; line-height: 1.65; padding: 1rem 1.2rem;
+    border-left-width: 4px;
+}
 .imes-step {
     display: flex; align-items: center; gap: 0.6rem; margin: 1.8rem 0 0.7rem 0;
 }
@@ -100,6 +104,14 @@ _CSS = """
     flex-shrink: 0;
 }
 .imes-step-title { font-weight: 700; font-size: 1.08rem; color: var(--text); }
+.imes-mode-label {
+    font-size: 1.35rem; font-weight: 800; color: var(--text);
+    margin: 1.6rem 0 0.7rem 0; letter-spacing: -0.01em;
+}
+[data-testid="stRadio"] label p {
+    font-size: 1.08rem !important; font-weight: 600 !important;
+}
+[data-testid="stRadio"] > div { gap: 1.8rem !important; }
 .stButton > button {
     background: var(--imes-orange) !important; color: white !important;
     border: none !important; border-radius: 999px !important;
@@ -266,11 +278,14 @@ if not Config.GIGACHAT_CREDENTIALS:
 _MODE_GENERATE = "Сгенерировать вопросы из лекции"
 _MODE_EXTRACT = "Привести готовые вопросы к формату"
 
-mode = st.radio(
-    "Что делаем?",
-    [_MODE_GENERATE, _MODE_EXTRACT],
-    horizontal=True,
-)
+st.markdown("<div class='imes-mode-label'>Что делаем?</div>", unsafe_allow_html=True)
+with st.container(border=True):
+    mode = st.radio(
+        "Что делаем?",
+        [_MODE_GENERATE, _MODE_EXTRACT],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
 
@@ -404,7 +419,7 @@ else:
             "Файл с вопросами", type=["pdf", "docx", "txt"], label_visibility="collapsed",
         )
         st.markdown(
-            "<div class='imes-disclaimer'>Поддерживаются PDF, Word (.docx) и обычный "
+            "<div class='imes-disclaimer imes-disclaimer-lg'>Поддерживаются PDF, Word (.docx) и обычный "
             "текст (.txt). Если в исходном docx/pdf преподавателя правильный ответ "
             "помечен жирным шрифтом или подчёркиванием, а не текстом (например, "
             "явным «Правильный ответ: Б» или звёздочкой) — наш парсер это не "
