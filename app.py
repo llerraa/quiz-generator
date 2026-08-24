@@ -24,6 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 from src.config import Config
 from src.exporters.excel_exporter import questions_to_excel_bytes
 from src.exporters.json_exporter import questions_to_json
+from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.gigachat_client import GigaChatClient
 from src.models import QuestionType
 from src.parsing.chunking import chunk_document
@@ -587,7 +588,7 @@ if st.session_state.get("questions"):
     )
 
     questions_only = [item["question"] for item in items]
-    col_dl1, col_dl2, _ = st.columns([1, 1, 3])
+    col_dl1, col_dl2, col_dl3, _ = st.columns([1, 1, 1, 2])
     with col_dl1:
         st.download_button(
             label="Скачать в JSON",
@@ -601,4 +602,11 @@ if st.session_state.get("questions"):
             data=questions_to_excel_bytes(questions_only),
             file_name="quiz_questions.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    with col_dl3:
+        st.download_button(
+            label="Скачать в QTI",
+            data=questions_to_qti_xml(questions_only),
+            file_name="quiz_questions_qti.xml",
+            mime="application/xml",
         )
