@@ -25,7 +25,7 @@ from src.config import Config
 from src.exporters.excel_exporter import questions_to_excel_bytes
 from src.exporters.json_exporter import questions_to_json
 from src.exporters.qti_exporter import questions_to_qti_xml
-from src.llm.gigachat_client import GigaChatClient
+from src.llm.bothub_client import BotHubClient
 from src.models import QuestionType
 from src.parsing.chunking import chunk_document
 from src.parsing.docx_parser import parse_docx
@@ -276,10 +276,10 @@ with col_visual:
     )
 
 # --- Проверка ключа GigaChat заранее, а не в момент нажатия кнопки ---
-if not Config.GIGACHAT_CREDENTIALS:
+if not Config.BOTHUB_API_KEY:
     st.error(
-        "Не найден ключ GigaChat. Скопируйте .env.example в .env и укажите "
-        "реальный GIGACHAT_CREDENTIALS, затем перезапустите приложение."
+        "Не найден ключ BotHub. Скопируйте .env.example в .env и укажите "
+        "реальный BOTHUB_API_KEY, затем перезапустите приложение."
     )
     st.stop()
 
@@ -388,7 +388,7 @@ if mode == _MODE_GENERATE:
             if not active_types:
                 st.warning("Выберите хотя бы один тип вопросов с количеством больше 0.")
             else:
-                client = GigaChatClient()
+                client = BotHubClient()
                 all_questions = []
                 total_steps = len(active_types) * len(chunks)
                 step = 0
@@ -511,7 +511,7 @@ else:
             if not types_to_find:
                 st.warning("Выберите хотя бы один тип вопросов для поиска.")
             else:
-                client = GigaChatClient()
+                client = BotHubClient()
                 all_questions = []
                 progress = st.progress(0.0, text="Ищем вопросы...")
 
@@ -555,7 +555,7 @@ if st.session_state.get("questions"):
             with col_regen:
                 if st.button("🔄 Перегенерировать", key=f"regen_{i}"):
                     try:
-                        client = GigaChatClient()
+                        client = BotHubClient()
                         new_questions = client.generate_questions(
                             text=item["source_text"],
                             question_type=item["question"].type,
