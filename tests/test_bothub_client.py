@@ -13,15 +13,26 @@ from pydantic import ValidationError
 
 from src.llm.bothub_client import (
     BotHubClient,
+    _GeneratedEssay,
+    _GeneratedEssayList,
     _GeneratedMatching,
     _GeneratedMatchingList,
     _GeneratedMatchingPair,
     _GeneratedMCQ,
     _GeneratedMCQList,
+    _GeneratedShortAnswer,
+    _GeneratedShortAnswerList,
     _GeneratedTrueFalse,
     _GeneratedTrueFalseList,
 )
-from src.models import MatchingQuestion, MultipleChoiceQuestion, QuestionType, TrueFalseQuestion
+from src.models import (
+    EssayQuestion,
+    MatchingQuestion,
+    MultipleChoiceQuestion,
+    QuestionType,
+    ShortAnswerQuestion,
+    TrueFalseQuestion,
+)
 
 
 def test_generated_matching_rejects_identical_right_values():
@@ -173,3 +184,67 @@ def test_extract_questions_finds_existing_questions(mock_openai_cls, monkeypatch
     assert len(result) == 1
     assert isinstance(result[0], MultipleChoiceQuestion)
     mock_client_instance.chat.completions.create.assert_called_once()
+
+
+# --- Тесты на новые типы: эссе и короткий ответ ---
+
+def test_to_app_model_converts_essay():
+    item = _GeneratedEssay(question="Опишите принцип работы нейросети", grading_criteria="Слои, веса, функция активации")
+    result = BotHubClient._to_app_model(item, QuestionType.ESSAY, source_pages=[7])
+
+    assert isinstance(result, EssayQuestion)
+    assert result.grading_criteria == "Слои, веса, функция активации"
+    assert result.source_pages == [7]
+
+
+def test_to_app_model_converts_short_answer():
+    item = _GeneratedShortAnswer(question="Функция f(x)=max(0,x)?", sample_answer="ReLU")
+    result = BotHubClient._to_app_model(item, QuestionType.SHORT_ANSWER, source_pages=[8])
+
+    assert isinstance(result, ShortAnswerQuestion)
+    assert result.sample_answer == "ReLU"
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_generate_questions_handles_essay_type(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+
+    mock_client_instance = MagicMock()
+    mock_openai_cls.return_value = mock_client_instance
+
+    fake_json = '{"questions": [{"question": "Опишите принцип работы нейросети", "grading_criteria": "Слои, веса"}]}'
+    fake_completion = MagicMock()
+    fake_completion.choices = [MagicMock(message=MagicMock(content=fake_json))]
+    fake_completion.usage.prompt_tokens = 50
+    fake_completion.usage.completion_tokens = 20
+    fake_completion.usage.total_tokens = 70
+    mock_client_instance.chat.completions.create.return_value = fake_completion
+
+    client = BotHubClient()
+    result = client.generate_questions(text="текст лекции", question_type=QuestionType.ESSAY, count=1)
+
+    assert len(result) == 1
+    assert isinstance(result[0], EssayQuestion)
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_generate_questions_handles_short_answer_type(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+
+    mock_client_instance = MagicMock()
+    mock_openai_cls.return_value = mock_client_instance
+
+    fake_json = '{"questions": [{"question": "Функция f(x)=max(0,x)?", "sample_answer": "ReLU"}]}'
+    fake_completion = MagicMock()
+    fake_completion.choices = [MagicMock(message=MagicMock(content=fake_json))]
+    fake_completion.usage.prompt_tokens = 40
+    fake_completion.usage.completion_tokens = 10
+    fake_completion.usage.total_tokens = 50
+    mock_client_instance.chat.completions.create.return_value = fake_completion
+
+    client = BotHubClient()
+    result = client.generate_questions(text="текст лекции", question_type=QuestionType.SHORT_ANSWER, count=1)
+
+    assert len(result) == 1
+    assert isinstance(result[0], ShortAnswerQuestion)
+    assert result[0].sample_answer == "ReLU"

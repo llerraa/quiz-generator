@@ -4,7 +4,14 @@ from io import BytesIO
 from openpyxl import load_workbook
 
 from src.exporters.excel_exporter import questions_to_excel_bytes
-from src.models import MatchingPair, MatchingQuestion, MultipleChoiceQuestion, TrueFalseQuestion
+from src.models import (
+    EssayQuestion,
+    MatchingPair,
+    MatchingQuestion,
+    MultipleChoiceQuestion,
+    ShortAnswerQuestion,
+    TrueFalseQuestion,
+)
 
 
 def test_questions_to_excel_produces_readable_file():
@@ -19,7 +26,6 @@ def test_questions_to_excel_produces_readable_file():
     ]
     data = questions_to_excel_bytes(questions)
 
-    # Открываем обратно тем же openpyxl — если файл битый, load_workbook упадёт
     wb = load_workbook(BytesIO(data))
     ws = wb.active
 
@@ -68,3 +74,27 @@ def test_questions_to_excel_handles_multiple_questions_and_row_count():
 def test_questions_to_excel_empty_list_still_produces_valid_file():
     wb = load_workbook(BytesIO(questions_to_excel_bytes([])))
     assert wb.active.max_row == 1  # только заголовок
+
+
+def test_questions_to_excel_essay_shows_grading_criteria():
+    questions = [
+        EssayQuestion(
+            question="Опишите принцип работы нейросети",
+            grading_criteria="Слои, веса, функция активации",
+            source_pages=[4],
+        )
+    ]
+    wb = load_workbook(BytesIO(questions_to_excel_bytes(questions)))
+    ws = wb.active
+
+    assert ws["C2"].value == "Опишите принцип работы нейросети"
+    assert ws["F2"].value == "Слои, веса, функция активации"  # критерии — в колонке "Объяснение"
+    assert ws["E2"].value is None  # нет единственного "правильного ответа"
+
+
+def test_questions_to_excel_short_answer_shows_sample_answer():
+    questions = [ShortAnswerQuestion(question="Функция f(x)=max(0,x)?", sample_answer="ReLU", source_pages=[5])]
+    wb = load_workbook(BytesIO(questions_to_excel_bytes(questions)))
+    ws = wb.active
+
+    assert ws["E2"].value == "ReLU"

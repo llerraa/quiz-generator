@@ -37,6 +37,8 @@ _TYPE_LABELS_RU = {
     QuestionType.MULTIPLE_CHOICE: "Множественный выбор",
     QuestionType.TRUE_FALSE: "Верно/неверно",
     QuestionType.MATCHING: "На соответствие",
+    QuestionType.ESSAY: "Эссе",
+    QuestionType.SHORT_ANSWER: "Короткий ответ",
 }
 
 # --- Фирменные стили ИМЭС (оранжевый/чёрный/белый) ---
@@ -248,6 +250,24 @@ def _render_question_card(q, index: int) -> str:
             f"{rows_html}<div class='imes-pages'>Страницы: {pages}</div></div>"
         )
 
+    if q.type == QuestionType.ESSAY:
+        return (
+            f"<div class='imes-qcard'><span class='imes-qcard-tag'>Эссе</span>"
+            f"<div class='imes-qcard-question'>{index}. {_esc(q.question)}</div>"
+            f"<div class='imes-explanation'><strong>Критерии оценки:</strong> "
+            f"{_esc(q.grading_criteria)}</div>"
+            f"<div class='imes-pages'>Страницы: {pages}</div></div>"
+        )
+
+    if q.type == QuestionType.SHORT_ANSWER:
+        return (
+            f"<div class='imes-qcard'><span class='imes-qcard-tag'>Короткий ответ</span>"
+            f"<div class='imes-qcard-question'>{index}. {_esc(q.question)}</div>"
+            f"<div class='imes-option imes-option-correct'>"
+            f"<span class='imes-option-mark'>✓</span><span>{_esc(q.sample_answer)}</span></div>"
+            f"<div class='imes-pages'>Страницы: {pages}</div></div>"
+        )
+
     return "<div class='imes-qcard'>Неизвестный тип вопроса</div>"
 
 
@@ -369,6 +389,11 @@ if mode == _MODE_GENERATE:
                 n_tf = st.number_input(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], min_value=0, max_value=20, value=3)
             with col3:
                 n_matching = st.number_input(_TYPE_LABELS_RU[QuestionType.MATCHING], min_value=0, max_value=20, value=2)
+            col4, col5, _ = st.columns(3)
+            with col4:
+                n_essay = st.number_input(_TYPE_LABELS_RU[QuestionType.ESSAY], min_value=0, max_value=20, value=0)
+            with col5:
+                n_short_answer = st.number_input(_TYPE_LABELS_RU[QuestionType.SHORT_ANSWER], min_value=0, max_value=20, value=0)
 
         # --- Шаг 3. Генерация ---
         st.markdown(
@@ -382,6 +407,8 @@ if mode == _MODE_GENERATE:
                 QuestionType.MULTIPLE_CHOICE: n_mcq,
                 QuestionType.TRUE_FALSE: n_tf,
                 QuestionType.MATCHING: n_matching,
+                QuestionType.ESSAY: n_essay,
+                QuestionType.SHORT_ANSWER: n_short_answer,
             }
             active_types = {qt: c for qt, c in counts.items() if c > 0}
 
@@ -491,6 +518,11 @@ else:
                 find_tf = st.checkbox(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], value=True)
             with col3:
                 find_matching = st.checkbox(_TYPE_LABELS_RU[QuestionType.MATCHING], value=True)
+            col4, col5, _ = st.columns(3)
+            with col4:
+                find_essay = st.checkbox(_TYPE_LABELS_RU[QuestionType.ESSAY], value=True)
+            with col5:
+                find_short_answer = st.checkbox(_TYPE_LABELS_RU[QuestionType.SHORT_ANSWER], value=True)
 
         # --- Шаг 3. Извлечение ---
         st.markdown(
@@ -505,6 +537,8 @@ else:
                     (QuestionType.MULTIPLE_CHOICE, find_mcq),
                     (QuestionType.TRUE_FALSE, find_tf),
                     (QuestionType.MATCHING, find_matching),
+                    (QuestionType.ESSAY, find_essay),
+                    (QuestionType.SHORT_ANSWER, find_short_answer),
                 ] if enabled
             ]
 

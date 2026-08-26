@@ -1,8 +1,5 @@
 """
 Экспорт сгенерированных вопросов в Excel (.xlsx) через openpyxl.
-
-Как и с JSON — отдаём готовые байты для st.download_button, без временных
-файлов на диске.
 """
 from io import BytesIO
 
@@ -10,10 +7,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from src.models import MatchingQuestion, MultipleChoiceQuestion, Question, TrueFalseQuestion
+from src.models import (
+    EssayQuestion,
+    MatchingQuestion,
+    MultipleChoiceQuestion,
+    Question,
+    ShortAnswerQuestion,
+    TrueFalseQuestion,
+)
 
-# Фирменный оранжевый ИМЭС — для шапки таблицы, чтобы файл выглядел
-# узнаваемо, а не как безликая выгрузка.
 _HEADER_FILL = PatternFill(start_color="FC4D0F", end_color="FC4D0F", fill_type="solid")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
 _WRAP = Alignment(wrap_text=True, vertical="top")
@@ -22,6 +24,8 @@ _TYPE_LABELS_RU = {
     "multiple_choice": "Множественный выбор",
     "true_false": "Верно/неверно",
     "matching": "На соответствие",
+    "essay": "Эссе",
+    "short_answer": "Короткий ответ",
 }
 
 _COLUMNS = [
@@ -31,12 +35,9 @@ _COLUMNS = [
 
 
 def _question_row(index: int, q: Question) -> list:
-    """Раскладывает один вопрос (любого из трёх типов) в строку таблицы."""
     pages = ", ".join(str(p) for p in q.source_pages) if q.source_pages else ""
 
     if isinstance(q, MultipleChoiceQuestion):
-        # Буквы A/B/C... вместо индексов 0/1/2 — привычнее преподавателю,
-        # который будет читать файл, а не разработчику.
         options_text = "\n".join(f"{chr(65 + i)}) {opt}" for i, opt in enumerate(q.options))
         correct_text = f"{chr(65 + q.correct_index)}) {q.options[q.correct_index]}"
         return [
@@ -52,27 +53,30 @@ def _question_row(index: int, q: Question) -> list:
 
     if isinstance(q, MatchingQuestion):
         pairs_text = "\n".join(f"{p.left} → {p.right}" for p in q.pairs)
-        # Для соответствия сами пары и есть "правильный ответ" — раскладывать
-        # отдельно неоткуда, поэтому дублируем в обе колонки.
         return [
             index, _TYPE_LABELS_RU["matching"], q.instruction,
             pairs_text, pairs_text, "", pages,
+        ]
+
+    if isinstance(q, EssayQuestion):
+        # У эссе нет единственного "правильного ответа" — вместо этого
+        # критерии оценки, по которым преподаватель проверяет вручную.
+        return [
+            index, _TYPE_LABELS_RU["essay"], q.question,
+            "", "", q.grading_criteria, pages,
+        ]
+
+    if isinstance(q, ShortAnswerQuestion):
+        return [
+            index, _TYPE_LABELS_RU["short_answer"], q.question,
+            "", q.sample_answer, "", pages,
         ]
 
     return [index, "Неизвестный тип вопроса", "", "", "", "", pages]
 
 
 def questions_to_excel_bytes(questions: list[Question]) -> bytes:
-    """
-    Собирает Excel-файл с вопросами и возвращает его как байты.
-
-    Args:
-        questions: список вопросов любого из трёх типов (см. src/models.py).
-
-    Returns:
-        Готовые байты .xlsx-файла для сохранения или прямой передачи
-        в st.download_button.
-    """
+    """Собирает Excel-файл с вопросами и возвращает его как байты."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Тест"
@@ -93,7 +97,7 @@ def questions_to_excel_bytes(questions: list[Question]) -> bytes:
     for i, width in enumerate([5, 20, 40, 35, 25, 35, 12], start=1):
         ws.column_dimensions[get_column_letter(i)].width = width
 
-    ws.freeze_panes = "A2"  # шапка остаётся видна при прокрутке
+    ws.freeze_panes = "A2"
 
     buffer = BytesIO()
     wb.save(buffer)

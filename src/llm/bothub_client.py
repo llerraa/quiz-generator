@@ -29,11 +29,13 @@ from pydantic import BaseModel, Field, model_validator
 
 from src.config import Config
 from src.models import (
+    EssayQuestion,
     MatchingPair,
     MatchingQuestion,
     MultipleChoiceQuestion,
     Question,
     QuestionType,
+    ShortAnswerQuestion,
     TrueFalseQuestion,
 )
 
@@ -102,16 +104,40 @@ class _GeneratedMatchingList(BaseModel):
     questions: list[_GeneratedMatching]
 
 
+class _GeneratedEssay(BaseModel):
+    question: str
+    grading_criteria: str = Field(
+        description="Критерии оценки — на что преподавателю обращать внимание при проверке ответа"
+    )
+
+
+class _GeneratedEssayList(BaseModel):
+    questions: list[_GeneratedEssay]
+
+
+class _GeneratedShortAnswer(BaseModel):
+    question: str
+    sample_answer: str = Field(description="Краткий эталонный ответ (слово, число или фраза)")
+
+
+class _GeneratedShortAnswerList(BaseModel):
+    questions: list[_GeneratedShortAnswer]
+
+
 _SCHEMA_BY_TYPE = {
     QuestionType.MULTIPLE_CHOICE: _GeneratedMCQList,
     QuestionType.TRUE_FALSE: _GeneratedTrueFalseList,
     QuestionType.MATCHING: _GeneratedMatchingList,
+    QuestionType.ESSAY: _GeneratedEssayList,
+    QuestionType.SHORT_ANSWER: _GeneratedShortAnswerList,
 }
 
 _TYPE_DESCRIPTION_RU = {
     QuestionType.MULTIPLE_CHOICE: "с несколькими вариантами ответа (ровно один верный)",
     QuestionType.TRUE_FALSE: "верно/неверно",
     QuestionType.MATCHING: "на соответствие (сопоставление пар «термин — определение»)",
+    QuestionType.ESSAY: "эссе (открытый вопрос, требующий развёрнутого письменного ответа)",
+    QuestionType.SHORT_ANSWER: "короткий ответ (открытый вопрос с кратким эталонным ответом)",
 }
 
 _SYSTEM_PROMPT_GENERATE = (
@@ -139,7 +165,17 @@ _SYSTEM_PROMPT_GENERATE = (
     "справа. Если несколько элементов слева описываются одним и тем "
     "же общим ответом справа — это не задание на соответствие, "
     "переформулируй так, чтобы у каждой пары был свой, отличающийся "
-    "от остальных правый вариант."
+    "от остальных правый вариант.\n\n"
+    "Для вопросов типа «эссе» (essay): вопрос должен требовать "
+    "развёрнутого рассуждения, а не одного факта — единственно "
+    "верного ответа здесь нет. В поле 'grading_criteria' перечисли "
+    "конкретные пункты, которые обязательно должны быть в хорошем "
+    "ответе (это не эталонный текст, а именно критерии для проверки).\n\n"
+    "Для вопросов типа «короткий ответ» (short_answer): вопрос должен "
+    "предполагать один конкретный, краткий ответ — слово, число или "
+    "короткую фразу (не разворачивай в вопрос с вариантами и не "
+    "проси развёрнутое рассуждение). В поле 'sample_answer' укажи "
+    "именно такой краткий ожидаемый ответ, без пояснений."
 )
 
 _SYSTEM_PROMPT_EXTRACT_TEMPLATE = (
@@ -317,6 +353,18 @@ class BotHubClient:
             return MatchingQuestion(
                 instruction=item.instruction,
                 pairs=pairs,
+                source_pages=source_pages,
+            )
+        if question_type == QuestionType.ESSAY:
+            return EssayQuestion(
+                question=item.question,
+                grading_criteria=item.grading_criteria,
+                source_pages=source_pages,
+            )
+        if question_type == QuestionType.SHORT_ANSWER:
+            return ShortAnswerQuestion(
+                question=item.question,
+                sample_answer=item.sample_answer,
                 source_pages=source_pages,
             )
         raise ValueError(f"Неизвестный тип вопроса: {question_type}")

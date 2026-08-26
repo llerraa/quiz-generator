@@ -2,7 +2,7 @@
 import xml.etree.ElementTree as ET
 
 from src.exporters.qti_exporter import questions_to_qti_xml
-from src.models import MatchingPair, MatchingQuestion, MultipleChoiceQuestion, TrueFalseQuestion
+from src.models import EssayQuestion, MatchingPair, MatchingQuestion, MultipleChoiceQuestion, ShortAnswerQuestion, TrueFalseQuestion
 
 
 def test_qti_xml_is_well_formed():
@@ -69,3 +69,39 @@ def test_qti_empty_list_still_produces_valid_xml():
     xml_str = questions_to_qti_xml([])
     root = ET.fromstring(xml_str)
     assert root.findall(".//item") == []
+
+
+def test_qti_essay_has_no_auto_scoring():
+    # У эссе нет единственного правильного ответа — resprocessing (авто-баллы)
+    # быть не должно, оценивает преподаватель вручную.
+    questions = [EssayQuestion(question="Опишите принцип работы нейросети", grading_criteria="Слои, веса")]
+    xml_str = questions_to_qti_xml(questions)
+    root = ET.fromstring(xml_str)
+    item = root.find(".//item")
+    assert item.find(".//resprocessing") is None
+
+
+def test_qti_essay_includes_grading_criteria_as_solution():
+    questions = [EssayQuestion(question="Q?", grading_criteria="Критерий А, критерий Б")]
+    xml_str = questions_to_qti_xml(questions)
+    root = ET.fromstring(xml_str)
+    solution_text = root.find(".//solutionmaterial/material/mattext")
+    assert solution_text.text == "Критерий А, критерий Б"
+
+
+def test_qti_short_answer_checks_against_sample_answer():
+    questions = [ShortAnswerQuestion(question="Функция f(x)=max(0,x)?", sample_answer="ReLU")]
+    xml_str = questions_to_qti_xml(questions)
+    root = ET.fromstring(xml_str)
+    varequal = root.find(".//varequal")
+    assert varequal.text == "ReLU"
+    assert varequal.get("case") == "No"  # без учёта регистра
+
+
+def test_qti_short_answer_uses_free_text_response_not_choices():
+    questions = [ShortAnswerQuestion(question="Q?", sample_answer="A")]
+    xml_str = questions_to_qti_xml(questions)
+    root = ET.fromstring(xml_str)
+    item = root.find(".//item")
+    assert item.find(".//response_str") is not None
+    assert item.find(".//response_lid") is None  # это не вопрос с вариантами
