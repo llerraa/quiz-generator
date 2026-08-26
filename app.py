@@ -24,6 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 from src.config import Config
 from src.exporters.excel_exporter import questions_to_excel_bytes
 from src.exporters.json_exporter import questions_to_json
+from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
 from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.bothub_client import BotHubClient
 from src.models import QuestionType
@@ -622,7 +623,7 @@ if st.session_state.get("questions"):
     )
 
     questions_only = [item["question"] for item in items]
-    col_dl1, col_dl2, col_dl3, _ = st.columns([1, 1, 1, 2])
+    col_dl1, col_dl2, col_dl3, col_dl4, _ = st.columns([1, 1, 1, 1, 1])
     with col_dl1:
         st.download_button(
             label="Скачать в JSON",
@@ -642,5 +643,12 @@ if st.session_state.get("questions"):
             label="Скачать в QTI",
             data=questions_to_qti_xml(questions_only),
             file_name="quiz_questions_qti.xml",
+            mime="application/xml",
+        )
+    with col_dl4:
+        st.download_button(
+            label="Скачать для Moodle",
+            data=questions_to_moodle_xml(questions_only),
+            file_name="quiz_questions_moodle.xml",
             mime="application/xml",
         )
