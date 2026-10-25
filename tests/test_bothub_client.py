@@ -248,3 +248,110 @@ def test_generate_questions_handles_short_answer_type(mock_openai_cls, monkeypat
     assert len(result) == 1
     assert isinstance(result[0], ShortAnswerQuestion)
     assert result[0].sample_answer == "ReLU"
+
+
+# --- Учёт расхода токенов и защита от скрытых повторов ---
+
+def _fake_completion(prompt_tokens, completion_tokens, content='{"questions": []}'):
+    completion = MagicMock()
+    completion.choices = [MagicMock(message=MagicMock(content=content))]
+    completion.usage.prompt_tokens = prompt_tokens
+    completion.usage.completion_tokens = completion_tokens
+    completion.usage.total_tokens = prompt_tokens + completion_tokens
+    return completion
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_usage_accumulates_over_several_calls(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    instance = MagicMock()
+    mock_openai_cls.return_value = instance
+    instance.chat.completions.create.side_effect = [
+        _fake_completion(1000, 200),
+        _fake_completion(500, 100),
+    ]
+
+    client = BotHubClient()
+    assert client.usage.calls == 0
+    client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+    client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+
+    assert client.usage.calls == 2
+    assert client.usage.prompt_tokens == 1500
+    assert client.usage.completion_tokens == 300
+    assert client.usage.total_tokens == 1800
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_usage_estimate_uses_configured_tariff(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    monkeypatch.setattr("src.llm.bothub_client.Config.CAPS_PER_INPUT_TOKEN", 1.0)
+    monkeypatch.setattr("src.llm.bothub_client.Config.CAPS_PER_OUTPUT_TOKEN", 10.0)
+    monkeypatch.setattr("src.llm.bothub_client.Config.RUB_PER_CAP", 0.5)
+    instance = MagicMock()
+    mock_openai_cls.return_value = instance
+    instance.chat.completions.create.return_value = _fake_completion(100, 20)
+
+    client = BotHubClient()
+    client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+
+    assert client.usage.estimated_caps == 100 * 1.0 + 20 * 10.0
+    assert client.usage.estimated_rub == pytest.approx(300 * 0.5)
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_missing_usage_in_response_does_not_crash(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    instance = MagicMock()
+    mock_openai_cls.return_value = instance
+    completion = _fake_completion(1, 1)
+    completion.usage = None  # провайдер иногда не присылает usage
+    instance.chat.completions.create.return_value = completion
+
+    client = BotHubClient()
+    client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+
+    assert client.usage.calls == 1
+    assert client.usage.total_tokens == 0
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_sdk_hidden_retries_are_disabled(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    BotHubClient()
+    assert mock_openai_cls.call_args.kwargs["max_retries"] == 0
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_budget_limit_blocks_next_request_but_not_the_one_in_flight(mock_openai_cls, monkeypatch):
+    from src.budget import BudgetExceeded
+
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    monkeypatch.setattr("src.llm.bothub_client.Config.CAPS_PER_INPUT_TOKEN", 1.0)
+    monkeypatch.setattr("src.llm.bothub_client.Config.CAPS_PER_OUTPUT_TOKEN", 1.0)
+    instance = MagicMock()
+    mock_openai_cls.return_value = instance
+    instance.chat.completions.create.return_value = _fake_completion(600, 500)  # 1100 CAPS за вызов
+
+    client = BotHubClient(max_caps=1000)
+    client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)  # первый проходит
+    assert client.usage.estimated_caps == 1100
+
+    with pytest.raises(BudgetExceeded) as err:
+        client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+    assert "Превышен лимит токенов на один файл" in str(err.value)
+    assert instance.chat.completions.create.call_count == 1  # второй запрос в сеть не ушёл
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_no_limit_by_default_and_zero_means_unlimited(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    instance = MagicMock()
+    mock_openai_cls.return_value = instance
+    instance.chat.completions.create.return_value = _fake_completion(100000, 100000)
+
+    for limit in (None, 0):
+        client = BotHubClient(max_caps=limit)
+        for _ in range(3):
+            client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
+        assert client.usage.calls == 3

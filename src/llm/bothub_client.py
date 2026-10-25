@@ -23,10 +23,12 @@ Claude в его собственном API нет параметра response_f
 """
 import json
 import logging
+from dataclasses import dataclass
 
 from openai import OpenAI
 from pydantic import BaseModel, Field, model_validator
 
+from src.budget import BudgetExceeded
 from src.config import Config
 from src.parsing.docx_parser import EMPHASIS_LEGEND
 from src.models import (
@@ -266,11 +268,38 @@ _SYSTEM_PROMPT_EXTRACT_TEMPLATE = (
 )
 
 
+@dataclass
+class UsageTotals:
+    """Сколько токенов израсходовали вызовы этого клиента (для показа расхода в интерфейсе)."""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def estimated_caps(self) -> float:
+        """Прикидка по тарифу из Config — настоящее списание смотрите в кабинете BotHub."""
+        return (
+            self.prompt_tokens * Config.CAPS_PER_INPUT_TOKEN
+            + self.completion_tokens * Config.CAPS_PER_OUTPUT_TOKEN
+        )
+
+    @property
+    def estimated_rub(self) -> float:
+        return self.estimated_caps * Config.RUB_PER_CAP
+
+
 class BotHubClient:
     """Обёртка над BotHub API (через SDK openai) — единственное место в проекте, знающее про BotHub."""
 
-    def __init__(self):
+    def __init__(self, max_caps: float | None = None):
+        """max_caps — лимит расхода этого клиента в CAPS (None или 0 — без лимита)."""
         Config.validate()
+        self.max_caps = max_caps or None
         self._client = OpenAI(
             api_key=Config.BOTHUB_API_KEY,
             base_url=Config.BOTHUB_BASE_URL,
@@ -278,7 +307,13 @@ class BotHubClient:
             # при проблемах с сетью/сервером это выглядит как зависание.
             # 60 секунд — с запасом даже для сложных структурированных ответов.
             timeout=60.0,
+            # SDK по умолчанию молча повторяет запрос до двух раз при сбое сети или
+            # таймауте. Если запрос уже дошёл до модели, повтор может оплачиваться
+            # ещё раз, а нам важнее предсказуемый расход: сбой лучше увидеть и
+            # нажать кнопку ещё раз, чем платить за скрытые повторы.
+            max_retries=0,
         )
+        self.usage = UsageTotals()
 
     def _call_structured(
         self,
@@ -296,6 +331,9 @@ class BotHubClient:
         Вместо этого явно требуем формат текстом в промпте и сами парсим
         и валидируем результат — надёжнее, чем полагаться на прокси.
         """
+        if self.max_caps is not None and self.usage.estimated_caps >= self.max_caps:
+            raise BudgetExceeded(self.usage.estimated_caps, self.max_caps)
+
         schema_json = json.dumps(schema_cls.model_json_schema(), ensure_ascii=False)
         format_instruction = (
             "\n\nОтветь СТРОГО в формате JSON и только JSON — без вступительных "
@@ -320,10 +358,16 @@ class BotHubClient:
         )
 
         usage = completion.usage
-        logger.info(
-            "BotHub usage: prompt=%s, completion=%s, total=%s",
-            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-        )
+        if usage is not None:
+            logger.info(
+                "BotHub usage: prompt=%s, completion=%s, total=%s",
+                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+            )
+            self.usage.calls += 1
+            self.usage.prompt_tokens += int(usage.prompt_tokens or 0)
+            self.usage.completion_tokens += int(usage.completion_tokens or 0)
+        else:
+            self.usage.calls += 1
 
         raw_content = completion.choices[0].message.content
         return self._parse_json_response(raw_content, schema_cls)

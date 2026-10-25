@@ -31,6 +31,13 @@ from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
 from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.bothub_client import BotHubClient
 from src.models import QuestionType
+from src.ui_modes import (
+    MODE_COURSE as _MODE_COURSE,
+    MODE_EXTRACT as _MODE_EXTRACT,
+    MODE_GENERATE as _MODE_GENERATE,
+    MODES as _MODES,
+    render_mode_comparison_html,
+)
 from src.parsing.chunking import chunk_document
 from src.parsing.aiken_parser import looks_like_aiken, parse_aiken
 from src.parsing.docx_parser import parse_docx
@@ -196,6 +203,17 @@ _CSS = """
     color: var(--text); font-size: 0.92rem;
 }
 .imes-matching-arrow { color: var(--imes-orange); }
+
+.imes-compare-wrap { overflow-x: auto; margin: 0.2rem 0 0.4rem; }
+.imes-compare { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.88rem; line-height: 1.45; }
+.imes-compare th, .imes-compare td {
+    padding: 0.55rem 0.75rem; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--border); color: var(--text);
+}
+.imes-compare thead th { font-weight: 700; border-bottom: 1.5px solid var(--imes-orange-border); }
+.imes-compare th.rowhead { color: var(--text-muted); font-weight: 600; white-space: nowrap; width: 1%; }
+.imes-compare th.is-current { background: var(--imes-orange); color: #fff; border-radius: 8px 8px 0 0; }
+.imes-compare td.is-current { background: var(--imes-orange-soft); }
 </style>
 """
 st.markdown(_CSS, unsafe_allow_html=True)
@@ -309,13 +327,31 @@ if not Config.BOTHUB_API_KEY:
     )
     st.stop()
 
-def _render_course_report(result) -> None:
+def _format_number(value: float) -> str:
+    return f"{value:,.0f}".replace(",", " ")
+
+
+def _render_course_report(result, usage=None) -> None:
     """Итог подготовки теста: сколько вошло, что пропущено и почему — ничего не теряется молча."""
     n = len(result.questions)
-    if result.source == "aiken":
-        st.info("Файл в формате Aiken прочитан без ИИ.")
+    if usage is not None and usage.calls:
+        st.info(
+            f"Расход этого запуска: запросов к ИИ — {usage.calls}, токенов — вход "
+            f"{_format_number(usage.prompt_tokens)}, выход {_format_number(usage.completion_tokens)}; "
+            f"примерно {_format_number(usage.estimated_caps)} CAPS (≈ {usage.estimated_rub:.2f} ₽). "
+            "Это прикидка по тарифу из настроек, точное списание смотрите в личном кабинете BotHub."
+        )
+    elif result.source == "aiken":
+        st.info("Файл в формате Aiken прочитан без ИИ. Расход этого запуска: 0.")
 
-    if n == 0:
+    if result.budget_error:
+        st.error(
+            f"{result.budget_error}. Обработка остановлена, чтобы не тратить деньги дальше: "
+            f"разобрано фрагментов {result.chunks_done} из {result.chunks_total}, "
+            f"в тест попало {n} из {result.target} вопросов. Это неполный результат — "
+            "не загружайте его в курс как готовый тест. Лимит меняется через COURSE_MAX_CAPS в .env."
+        )
+    elif n == 0:
         st.error("Ни один вопрос не подошёл для теста.")
     elif result.shortfall == 0:
         st.success(f"В тест вошло {n} вопросов из {result.target}.")
@@ -356,18 +392,17 @@ def _render_course_report(result) -> None:
                 st.markdown(f"{number}. по пометке в файле: `{shown}`")
 
 
-_MODE_COURSE = "Тест для курса (из файла преподавателя)"
-_MODE_GENERATE = "Сгенерировать вопросы из лекции"
-_MODE_EXTRACT = "Привести готовые вопросы к формату"
-
 st.markdown("<div class='imes-mode-label'>Что делаем?</div>", unsafe_allow_html=True)
 with st.container(border=True):
     mode = st.radio(
         "Что делаем?",
-        [_MODE_COURSE, _MODE_GENERATE, _MODE_EXTRACT],
+        _MODES,
         horizontal=True,
         label_visibility="collapsed",
     )
+
+with st.expander(f"Чем отличаются режимы — сейчас выбран режим {mode[0]}", expanded=True):
+    st.markdown(render_mode_comparison_html(mode), unsafe_allow_html=True)
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
 # При смене режима старые результаты больше не относятся к делу (сгенерированные
@@ -376,6 +411,7 @@ st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True
 if st.session_state.get("_active_mode") != mode:
     st.session_state["questions"] = []
     st.session_state["course_result"] = None
+    st.session_state["course_usage"] = None
     st.session_state["_active_mode"] = mode
 
 
@@ -692,6 +728,7 @@ else:
     if st.session_state.get("_course_file_sig") != course_file_sig:
         st.session_state["questions"] = []
         st.session_state["course_result"] = None
+        st.session_state["course_usage"] = None
         st.session_state["_course_file_sig"] = course_file_sig
 
     if uploaded_course is not None:
@@ -724,12 +761,21 @@ else:
             "<span class='imes-step-title'>Подготовка теста</span></div>",
             unsafe_allow_html=True,
         )
-        if st.button("Подготовить тест", type="primary"):
+        too_long = (not course_is_aiken) and len(loaded.text) > Config.COURSE_MAX_CHARS
+        if too_long:
+            st.error(
+                f"Файл слишком большой для обработки ИИ: {_format_number(len(loaded.text))} символов, "
+                f"предел — {_format_number(Config.COURSE_MAX_CHARS)}. Это защита от случайного большого "
+                "расхода. Если файл настоящий, разрежьте его на части или поднимите COURSE_MAX_CHARS в .env."
+            )
+        if st.button("Подготовить тест", type="primary", disabled=too_long):
+            course_usage = None
+            client = None
             try:
                 if course_is_aiken:
                     course_result = prepare_course_test(loaded.text, None)
                 else:
-                    client = BotHubClient()
+                    client = BotHubClient(max_caps=Config.COURSE_MAX_CAPS)
                     progress = st.progress(0.0, text="Ищем вопросы...")
 
                     def _on_progress(done: int, total: int) -> None:
@@ -739,9 +785,18 @@ else:
                         loaded.text, client.extract_course_questions, on_progress=_on_progress
                     )
                     progress.empty()
+                    course_usage = client.usage
             except Exception as exc:
                 st.error(f"Не удалось подготовить тест: {exc}")
+                # Даже при сбое часть запросов могла уже пройти и стоить денег — не прячем это.
+                if client is not None and client.usage.calls:
+                    st.warning(
+                        f"До сбоя успело пройти запросов: {client.usage.calls}, "
+                        f"примерно {_format_number(client.usage.estimated_caps)} CAPS. "
+                        "Сверьтесь с личным кабинетом BotHub."
+                    )
             else:
+                st.session_state["course_usage"] = course_usage
                 st.session_state["questions"] = [
                     {"question": q, "source_text": "", "mode": "extract"}
                     for q in course_result.questions
@@ -751,7 +806,7 @@ else:
                 st.session_state["course_source_stem"] = stem or "quiz"
 
     if st.session_state.get("course_result") is not None:
-        _render_course_report(st.session_state["course_result"])
+        _render_course_report(st.session_state["course_result"], st.session_state.get("course_usage"))
 
 
 # --- Просмотр результата ---

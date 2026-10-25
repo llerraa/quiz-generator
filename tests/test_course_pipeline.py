@@ -224,3 +224,35 @@ def test_chunks_cover_all_lines_and_overlap():
 def test_very_long_single_line_does_not_hang():
     chunks = split_text("а" * (CHUNK_CHARS * 3))
     assert "".join(chunks) == "а" * (CHUNK_CHARS * 3)
+
+
+
+# ---------- лимит расхода на файл ----------
+
+def test_budget_exceeded_stops_processing_and_keeps_found_questions():
+    from src.budget import BudgetExceeded
+
+    text = _long_text()
+    total = len(split_text(text))
+    assert total >= 3
+    calls = []
+
+    def extract(chunk):
+        calls.append(chunk)
+        if len(calls) == 2:
+            raise BudgetExceeded(9500, 9000)
+        return _CourseExtraction(questions=[mcq("Первый вопрос?")])
+
+    result = prepare_course_test(text, extract)
+
+    assert len(calls) == 2  # на третий фрагмент запрос не ушёл
+    assert "Превышен лимит токенов на один файл" in result.budget_error
+    assert result.chunks_done == 1 and result.chunks_total == total
+    assert len(result.questions) == 1  # то, что нашли до остановки, сохранено
+    assert result.errors == []  # это не «сбойный фрагмент», а осознанная остановка
+
+
+def test_no_budget_error_on_normal_run():
+    result = prepare_course_test(_long_text(200), fake(mcq()))
+    assert result.budget_error == ""
+    assert result.chunks_done == result.chunks_total

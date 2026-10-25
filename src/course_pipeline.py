@@ -23,6 +23,7 @@
 from dataclasses import dataclass, field
 from typing import Callable
 
+from src.budget import BudgetExceeded
 from src.models import MultipleChoiceQuestion, TrueFalseQuestion
 from src.parsing.aiken_parser import looks_like_aiken, parse_aiken
 
@@ -49,6 +50,9 @@ class CourseTestResult:
     stopped_early: bool = False  # набрали цель, остаток файла не разбирали
     extra_valid: int = 0  # подходящих вопросов сверх цели (отброшены)
     target: int = TARGET_QUESTIONS
+    budget_error: str = ""  # не пусто, если обработка остановлена из-за лимита расхода на файл
+    chunks_done: int = 0
+    chunks_total: int = 0
 
     @property
     def shortfall(self) -> int:
@@ -165,6 +169,7 @@ def prepare_course_test(
     result = CourseTestResult(source="llm", target=target)
     seen: set[str] = set()
     chunks = split_text(text)
+    result.chunks_total = len(chunks)
 
     for index, chunk in enumerate(chunks, start=1):
         if len(result.questions) >= target:
@@ -172,8 +177,13 @@ def prepare_course_test(
             break
         try:
             extraction = extract_fn(chunk)
+        except BudgetExceeded as exc:
+            # Лимит расхода на файл: дальше не идём, но уже найденное сохраняем.
+            result.budget_error = str(exc)
+            break
         except Exception as exc:  # один сбойный фрагмент не должен терять остальные
             result.errors.append(f"Фрагмент {index} из {len(chunks)} не обработан: {exc}")
+            result.chunks_done = index
             if on_progress:
                 on_progress(index, len(chunks))
             continue
@@ -203,6 +213,7 @@ def prepare_course_test(
                 SkippedQuestion(title=_short(item.text), reason=f"нет вариантов ответа: {item.reason}")
             )
 
+        result.chunks_done = index
         if on_progress:
             on_progress(index, len(chunks))
 
