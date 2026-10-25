@@ -8,6 +8,7 @@ TODO: экспорт в QTI (src/exporters/qti_exporter.py — пока загл
 """
 import html as html_lib
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -22,6 +23,8 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from src.config import Config
+from src.course_pipeline import prepare_course_test
+from src.exporters.aiken_exporter import count_skipped_for_aiken, questions_to_aiken
 from src.exporters.excel_exporter import questions_to_excel_bytes
 from src.exporters.json_exporter import questions_to_json
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
@@ -29,7 +32,9 @@ from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.bothub_client import BotHubClient
 from src.models import QuestionType
 from src.parsing.chunking import chunk_document
+from src.parsing.aiken_parser import looks_like_aiken, parse_aiken
 from src.parsing.docx_parser import parse_docx
+from src.parsing.file_loader import load_question_file
 from src.parsing.pdf_parser import parse_pdf
 
 st.set_page_config(page_title="Генератор тестов из лекций", page_icon="📝", layout="wide")
@@ -304,6 +309,54 @@ if not Config.BOTHUB_API_KEY:
     )
     st.stop()
 
+def _render_course_report(result) -> None:
+    """Итог подготовки теста: сколько вошло, что пропущено и почему — ничего не теряется молча."""
+    n = len(result.questions)
+    if result.source == "aiken":
+        st.info("Файл в формате Aiken прочитан без ИИ.")
+
+    if n == 0:
+        st.error("Ни один вопрос не подошёл для теста.")
+    elif result.shortfall == 0:
+        st.success(f"В тест вошло {n} вопросов из {result.target}.")
+    else:
+        st.warning(
+            f"В тест вошло {n} из {result.target}: подходящих вопросов в файле "
+            f"не хватило, не хватает {result.shortfall}."
+        )
+
+    if result.extra_valid:
+        st.info(
+            f"Подходящих вопросов больше, чем нужно: взяты первые {result.target}, "
+            f"ещё {result.extra_valid} не вошли."
+        )
+    if result.stopped_early:
+        st.info("Нужное число вопросов набрано — остальную часть файла не разбирали.")
+
+    for message in result.errors:
+        st.error(message)
+
+    if result.skipped:
+        st.warning(
+            f"Пропущено вопросов: {len(result.skipped)}. Они не подходят под формат Aiken "
+            "(один вариант из списка, один верный ответ) — их нужно поправить в исходном файле "
+            "или добавить вручную."
+        )
+        with st.expander("Какие вопросы пропущены и почему", expanded=n == 0 or len(result.skipped) <= 8):
+            for item in result.skipped:
+                if item.title:
+                    st.markdown(f"- «{item.title}» — {item.reason}")
+                else:
+                    st.markdown(f"- {item.reason}")
+
+    if n and result.source == "llm":
+        with st.expander("Как определены правильные ответы (для проверки)"):
+            for number, (q, evidence) in enumerate(zip(result.questions, result.evidence), start=1):
+                shown = evidence.replace("`", "'")
+                st.markdown(f"{number}. по пометке в файле: `{shown}`")
+
+
+_MODE_COURSE = "Тест для курса (из файла преподавателя)"
 _MODE_GENERATE = "Сгенерировать вопросы из лекции"
 _MODE_EXTRACT = "Привести готовые вопросы к формату"
 
@@ -311,7 +364,7 @@ st.markdown("<div class='imes-mode-label'>Что делаем?</div>", unsafe_al
 with st.container(border=True):
     mode = st.radio(
         "Что делаем?",
-        [_MODE_GENERATE, _MODE_EXTRACT],
+        [_MODE_COURSE, _MODE_GENERATE, _MODE_EXTRACT],
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -322,6 +375,7 @@ st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True
 # иначе они молча остаются висеть на экране под новым режимом.
 if st.session_state.get("_active_mode") != mode:
     st.session_state["questions"] = []
+    st.session_state["course_result"] = None
     st.session_state["_active_mode"] = mode
 
 
@@ -453,7 +507,7 @@ if mode == _MODE_GENERATE:
                 st.session_state["questions"] = all_questions
                 st.success(f"Готово! Сгенерировано вопросов: {len(all_questions)}")
 
-else:
+elif mode == _MODE_EXTRACT:
     # --- Шаг 1. Загрузка файла с готовыми вопросами ---
     st.markdown(
         "<div class='imes-step'><span class='imes-step-badge'>1</span>"
@@ -469,7 +523,8 @@ else:
             "текст (.txt). Если в исходном docx/pdf преподавателя правильный ответ "
             "помечен жирным шрифтом или подчёркиванием, а не текстом (например, "
             "явным «Правильный ответ: Б» или звёздочкой) — наш парсер это не "
-            "увидит, потому что извлекает обычный текст без форматирования.</div>",
+            "увидит, потому что извлекает обычный текст без форматирования. "
+            "Файл в формате Aiken (.txt) читается без ИИ.</div>",
             unsafe_allow_html=True,
         )
 
@@ -490,7 +545,7 @@ else:
                 tmp.write(raw_bytes)
                 tmp_path = tmp.name
             try:
-                existing_text = parse_docx(tmp_path)
+                existing_text = parse_docx(tmp_path, mark_emphasis=False)  # у этого режима свой промпт, он меток не знает
             finally:
                 os.unlink(tmp_path)
         else:  # .txt
@@ -505,80 +560,205 @@ else:
             unsafe_allow_html=True,
         )
 
-        # --- Шаг 2. Какие типы вопросов искать ---
+        is_aiken = looks_like_aiken(existing_text)
+
+        if is_aiken:
+            # --- Файл в формате Aiken: читаем обычным кодом, без ИИ ---
+            st.markdown(
+                "<div class='imes-step'><span class='imes-step-badge'>2</span>"
+                "<span class='imes-step-title'>Чтение формата Aiken</span></div>",
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+                st.markdown(
+                    "<div class='imes-disclaimer imes-disclaimer-lg'>Файл распознан как формат "
+                    "<strong>Aiken</strong>. Он строгий, поэтому вопросы читаются обычной программой, "
+                    "без обращения к ИИ: бесплатно, мгновенно, и ничего не «додумывается». "
+                    "Aiken хранит только вопросы с выбором ответа и «верно/неверно» — "
+                    "другие типы из такого файла не извлекаются.</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("Прочитать вопросы", type="primary"):
+                    parsed = parse_aiken(existing_text)
+                    st.session_state["questions"] = [
+                        {"question": q, "source_text": existing_text, "mode": "extract"}
+                        for q in parsed.questions
+                    ]
+                    if parsed.questions:
+                        st.success(f"Готово! Прочитано вопросов: {len(parsed.questions)}")
+                    else:
+                        st.warning("Ни один вопрос прочитать не удалось.")
+                    if parsed.errors:
+                        st.warning(
+                            f"Не удалось прочитать вопросов: {len(parsed.errors)}. "
+                            "Эти вопросы пропущены:\n\n"
+                            + "\n".join(f"- {err}" for err in parsed.errors)
+                        )
+        else:
+            # --- Шаг 2. Какие типы вопросов искать ---
+            st.markdown(
+                "<div class='imes-step'><span class='imes-step-badge'>2</span>"
+                "<span class='imes-step-title'>Какие типы вопросов искать</span></div>",
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    find_mcq = st.checkbox(_TYPE_LABELS_RU[QuestionType.MULTIPLE_CHOICE], value=True)
+                with col2:
+                    find_tf = st.checkbox(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], value=True)
+                with col3:
+                    find_matching = st.checkbox(_TYPE_LABELS_RU[QuestionType.MATCHING], value=True)
+                col4, col5, _ = st.columns(3)
+                with col4:
+                    find_essay = st.checkbox(_TYPE_LABELS_RU[QuestionType.ESSAY], value=True)
+                with col5:
+                    find_short_answer = st.checkbox(_TYPE_LABELS_RU[QuestionType.SHORT_ANSWER], value=True)
+
+            # --- Шаг 3. Извлечение ---
+            st.markdown(
+                "<div class='imes-step'><span class='imes-step-badge'>3</span>"
+                "<span class='imes-step-title'>Извлечение</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            if st.button("Извлечь вопросы", type="primary"):
+                types_to_find = [
+                    qt for qt, enabled in [
+                        (QuestionType.MULTIPLE_CHOICE, find_mcq),
+                        (QuestionType.TRUE_FALSE, find_tf),
+                        (QuestionType.MATCHING, find_matching),
+                        (QuestionType.ESSAY, find_essay),
+                        (QuestionType.SHORT_ANSWER, find_short_answer),
+                    ] if enabled
+                ]
+
+                if not types_to_find:
+                    st.warning("Выберите хотя бы один тип вопросов для поиска.")
+                else:
+                    client = BotHubClient()
+                    all_questions = []
+                    progress = st.progress(0.0, text="Ищем вопросы...")
+
+                    for i, question_type in enumerate(types_to_find, start=1):
+                        progress.progress(
+                            i / len(types_to_find),
+                            text=f"Ищем: {_TYPE_LABELS_RU[question_type]}...",
+                        )
+                        try:
+                            questions = client.extract_questions(
+                                text=existing_text, question_type=question_type
+                            )
+                            for q in questions:
+                                all_questions.append(
+                                    {"question": q, "source_text": existing_text, "mode": "extract"}
+                                )
+                        except Exception as exc:
+                            st.error(f"Ошибка извлечения ({_TYPE_LABELS_RU[question_type]}): {exc}")
+
+                    progress.empty()
+                    st.session_state["questions"] = all_questions
+                    if all_questions:
+                        st.success(f"Готово! Найдено вопросов: {len(all_questions)}")
+                    else:
+                        st.warning("Вопросов выбранных типов в файле не нашлось.")
+
+
+else:
+    # --- Режим «Тест для курса»: файл преподавателя → до 25 вопросов в формате Aiken ---
+    st.markdown(
+        "<div class='imes-step'><span class='imes-step-badge'>1</span>"
+        "<span class='imes-step-title'>Загрузите файл преподавателя</span></div>",
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        uploaded_course = st.file_uploader(
+            "Файл преподавателя", type=["pdf", "docx", "txt"], label_visibility="collapsed",
+            key="course_uploader",
+        )
+        st.markdown(
+            "<div class='imes-disclaimer imes-disclaimer-lg'>Подойдёт файл с готовыми вопросами "
+            "в любом оформлении: Aiken, Word, PDF или текст. Правильный ответ может быть отмечен "
+            "словами («Ответ: Б»), знаком (*, +), ключом в конце файла, а также жирным шрифтом, "
+            "подчёркиванием, маркером или цветом. <strong>ИИ ответы сам не выбирает</strong>: он "
+            "только переносит пометки из файла, а если пометки нет — вопрос пропускается, и вы "
+            "увидите это в отчёте. В тест войдут первые 25 подходящих вопросов с одним верным "
+            "ответом.</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Новый файл (или файл убрали) — отчёт и вопросы от прошлого файла больше не актуальны.
+    course_file_sig = (uploaded_course.name, uploaded_course.size) if uploaded_course is not None else None
+    if st.session_state.get("_course_file_sig") != course_file_sig:
+        st.session_state["questions"] = []
+        st.session_state["course_result"] = None
+        st.session_state["_course_file_sig"] = course_file_sig
+
+    if uploaded_course is not None:
+        try:
+            loaded = load_question_file(uploaded_course.read(), Path(uploaded_course.name).suffix)
+        except ValueError as exc:
+            st.error(str(exc))
+            st.stop()
+
+        for warning_text in loaded.warnings:
+            st.warning(warning_text)
+        if not loaded.text.strip():
+            st.error("Не удалось извлечь текст из файла — проверьте, что в нём есть текстовый слой.")
+            st.stop()
+
+        course_is_aiken = looks_like_aiken(loaded.text)
+        st.markdown(
+            "<div class='imes-disclaimer'>"
+            + (
+                "Файл распознан как <strong>Aiken</strong> — вопросы будут прочитаны без ИИ."
+                if course_is_aiken
+                else "Файл не в формате Aiken — вопросы найдёт ИИ (расходуются токены BotHub)."
+            )
+            + f" Извлечено {len(loaded.text)} символов текста.</div>",
+            unsafe_allow_html=True,
+        )
+
         st.markdown(
             "<div class='imes-step'><span class='imes-step-badge'>2</span>"
-            "<span class='imes-step-title'>Какие типы вопросов искать</span></div>",
+            "<span class='imes-step-title'>Подготовка теста</span></div>",
             unsafe_allow_html=True,
         )
-        with st.container(border=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                find_mcq = st.checkbox(_TYPE_LABELS_RU[QuestionType.MULTIPLE_CHOICE], value=True)
-            with col2:
-                find_tf = st.checkbox(_TYPE_LABELS_RU[QuestionType.TRUE_FALSE], value=True)
-            with col3:
-                find_matching = st.checkbox(_TYPE_LABELS_RU[QuestionType.MATCHING], value=True)
-            col4, col5, _ = st.columns(3)
-            with col4:
-                find_essay = st.checkbox(_TYPE_LABELS_RU[QuestionType.ESSAY], value=True)
-            with col5:
-                find_short_answer = st.checkbox(_TYPE_LABELS_RU[QuestionType.SHORT_ANSWER], value=True)
-
-        # --- Шаг 3. Извлечение ---
-        st.markdown(
-            "<div class='imes-step'><span class='imes-step-badge'>3</span>"
-            "<span class='imes-step-title'>Извлечение</span></div>",
-            unsafe_allow_html=True,
-        )
-
-        if st.button("Извлечь вопросы", type="primary"):
-            types_to_find = [
-                qt for qt, enabled in [
-                    (QuestionType.MULTIPLE_CHOICE, find_mcq),
-                    (QuestionType.TRUE_FALSE, find_tf),
-                    (QuestionType.MATCHING, find_matching),
-                    (QuestionType.ESSAY, find_essay),
-                    (QuestionType.SHORT_ANSWER, find_short_answer),
-                ] if enabled
-            ]
-
-            if not types_to_find:
-                st.warning("Выберите хотя бы один тип вопросов для поиска.")
-            else:
-                client = BotHubClient()
-                all_questions = []
-                progress = st.progress(0.0, text="Ищем вопросы...")
-
-                for i, question_type in enumerate(types_to_find, start=1):
-                    progress.progress(
-                        i / len(types_to_find),
-                        text=f"Ищем: {_TYPE_LABELS_RU[question_type]}...",
-                    )
-                    try:
-                        questions = client.extract_questions(
-                            text=existing_text, question_type=question_type
-                        )
-                        for q in questions:
-                            all_questions.append(
-                                {"question": q, "source_text": existing_text, "mode": "extract"}
-                            )
-                    except Exception as exc:
-                        st.error(f"Ошибка извлечения ({_TYPE_LABELS_RU[question_type]}): {exc}")
-
-                progress.empty()
-                st.session_state["questions"] = all_questions
-                if all_questions:
-                    st.success(f"Готово! Найдено вопросов: {len(all_questions)}")
+        if st.button("Подготовить тест", type="primary"):
+            try:
+                if course_is_aiken:
+                    course_result = prepare_course_test(loaded.text, None)
                 else:
-                    st.warning("Вопросов выбранных типов в файле не нашлось.")
+                    client = BotHubClient()
+                    progress = st.progress(0.0, text="Ищем вопросы...")
+
+                    def _on_progress(done: int, total: int) -> None:
+                        progress.progress(done / total, text=f"Обработано фрагментов: {done} из {total}")
+
+                    course_result = prepare_course_test(
+                        loaded.text, client.extract_course_questions, on_progress=_on_progress
+                    )
+                    progress.empty()
+            except Exception as exc:
+                st.error(f"Не удалось подготовить тест: {exc}")
+            else:
+                st.session_state["questions"] = [
+                    {"question": q, "source_text": "", "mode": "extract"}
+                    for q in course_result.questions
+                ]
+                st.session_state["course_result"] = course_result
+                stem = re.sub(r"[^\w\-]+", "_", Path(uploaded_course.name).stem).strip("_")
+                st.session_state["course_source_stem"] = stem or "quiz"
+
+    if st.session_state.get("course_result") is not None:
+        _render_course_report(st.session_state["course_result"])
 
 
 # --- Просмотр результата ---
 if st.session_state.get("questions"):
     items = st.session_state["questions"]
     st.markdown(
-        f"<div class='imes-step'><span class='imes-step-badge'>4</span>"
+        f"<div class='imes-step'><span class='imes-step-badge'>{3 if mode == _MODE_COURSE else 4}</span>"
         f"<span class='imes-step-title'>Результат ({len(items)})</span></div>",
         unsafe_allow_html=True,
     )
@@ -609,46 +789,97 @@ if st.session_state.get("questions"):
                     except Exception as exc:
                         st.error(f"Ошибка перегенерации: {exc}")
 
-    st.markdown(
-        "<div class='imes-warning-white'>"
-        "<strong>Перед использованием — перепроверьте вопросы.</strong> ИИ может "
-        "допускать ошибки, особенно в выборе правильного варианта. Обратите "
-        "особое внимание на поле «Объяснение» у вопросов с множественным выбором: "
-        "если там нет связного текста (например, вместо объяснения стоит один "
-        "символ или короткая бессмысленная фраза) — это признак того, что "
-        "правильный ответ стоит проверить вручную, сверившись с исходным "
-        "материалом. Заметили неверный вопрос — воспользуйтесь кнопкой "
-        "«Перегенерировать» рядом с ним.</div>",
-        unsafe_allow_html=True,
-    )
+    if mode == _MODE_COURSE:
+        st.markdown(
+            "<div class='imes-warning-white'>"
+            "<strong>Перед загрузкой в курс — сверьте ответы с исходным файлом.</strong> "
+            "В отчёте выше раскрывается список «Как определены правильные ответы»: для каждого "
+            "вопроса там показана пометка из файла, по которой выбран ответ. Если она выглядит "
+            "случайной (например, это не «Ответ: Б», а часть текста вопроса), проверьте такой "
+            "вопрос вручную.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<div class='imes-warning-white'>"
+            "<strong>Перед использованием — перепроверьте вопросы.</strong> ИИ может "
+            "допускать ошибки, особенно в выборе правильного варианта. Обратите "
+            "особое внимание на поле «Объяснение» у вопросов с множественным выбором: "
+            "если там нет связного текста (например, вместо объяснения стоит один "
+            "символ или короткая бессмысленная фраза) — это признак того, что "
+            "правильный ответ стоит проверить вручную, сверившись с исходным "
+            "материалом. Заметили неверный вопрос — воспользуйтесь кнопкой "
+            "«Перегенерировать» рядом с ним.</div>",
+            unsafe_allow_html=True,
+        )
 
     questions_only = [item["question"] for item in items]
-    col_dl1, col_dl2, col_dl3, col_dl4, _ = st.columns([1, 1, 1, 1, 1])
-    with col_dl1:
-        st.download_button(
-            label="Скачать в JSON",
-            data=questions_to_json(questions_only),
-            file_name="quiz_questions.json",
-            mime="application/json",
-        )
-    with col_dl2:
-        st.download_button(
-            label="Скачать в Excel",
-            data=questions_to_excel_bytes(questions_only),
-            file_name="quiz_questions.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    with col_dl3:
-        st.download_button(
-            label="Скачать в QTI",
-            data=questions_to_qti_xml(questions_only),
-            file_name="quiz_questions_qti.xml",
-            mime="application/xml",
-        )
-    with col_dl4:
-        st.download_button(
-            label="Скачать для Moodle",
-            data=questions_to_moodle_xml(questions_only),
-            file_name="quiz_questions_moodle.xml",
-            mime="application/xml",
-        )
+    aiken_text = questions_to_aiken(questions_only)
+    aiken_skipped = count_skipped_for_aiken(questions_only)
+    if mode == _MODE_COURSE:
+        file_stem = st.session_state.get("course_source_stem") or "quiz"
+        col_a, col_b, _ = st.columns([1, 1, 2])
+        with col_a:
+            st.download_button(
+                label="Скачать в Aiken",
+                data=aiken_text,
+                file_name=f"{file_stem}_aiken.txt",
+                mime="text/plain",
+                disabled=not aiken_text,
+                help="Для импорта в Moodle: Банк вопросов → Импорт → Aiken.",
+            )
+        with col_b:
+            st.download_button(
+                label="Скачать для Moodle (XML)",
+                data=questions_to_moodle_xml(questions_only),
+                file_name=f"{file_stem}_moodle.xml",
+                mime="application/xml",
+                help="Формат для автоматической загрузки в курс; импорт в Moodle проверен на практике.",
+            )
+    else:
+        col_dl1, col_dl2, col_dl3, col_dl4, col_dl5 = st.columns(5)
+        with col_dl1:
+            st.download_button(
+                label="Скачать в JSON",
+                data=questions_to_json(questions_only),
+                file_name="quiz_questions.json",
+                mime="application/json",
+            )
+        with col_dl2:
+            st.download_button(
+                label="Скачать в Excel",
+                data=questions_to_excel_bytes(questions_only),
+                file_name="quiz_questions.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        with col_dl3:
+            st.download_button(
+                label="Скачать в QTI",
+                data=questions_to_qti_xml(questions_only),
+                file_name="quiz_questions_qti.xml",
+                mime="application/xml",
+            )
+        with col_dl4:
+            st.download_button(
+                label="Скачать для Moodle",
+                data=questions_to_moodle_xml(questions_only),
+                file_name="quiz_questions_moodle.xml",
+                mime="application/xml",
+            )
+        with col_dl5:
+            st.download_button(
+                label="Скачать в Aiken",
+                data=aiken_text,
+                file_name="quiz_questions_aiken.txt",
+                mime="text/plain",
+                disabled=not aiken_text,
+                help="Простой текстовый формат для импорта в Moodle (Банк вопросов → Импорт → Aiken).",
+            )
+        if aiken_skipped:
+            st.markdown(
+                f"<div class='imes-disclaimer'>В файл Aiken не вошло вопросов: <strong>{aiken_skipped}</strong>. "
+                "Этот формат хранит только вопросы с выбором ответа и «верно/неверно»; "
+                "соответствие, эссе и короткий ответ в нём выразить нельзя — "
+                "для них используйте «Скачать для Moodle».</div>",
+                unsafe_allow_html=True,
+            )

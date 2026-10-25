@@ -28,6 +28,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field, model_validator
 
 from src.config import Config
+from src.parsing.docx_parser import EMPHASIS_LEGEND
 from src.models import (
     EssayQuestion,
     MatchingPair,
@@ -178,6 +179,66 @@ _SYSTEM_PROMPT_GENERATE = (
     "именно такой краткий ожидаемый ответ, без пояснений."
 )
 
+# --- Извлечение для теста в курс (режим «Тест для курса») ---
+# Здесь схема намеренно «мягкая»: модель описывает всё, что видит, в том числе
+# вопросы без отмеченного ответа или с несколькими. Решение «годится / не годится
+# под Aiken» принимает наш код (src/course_pipeline.py), а не модель, — иначе
+# одна необычная запись обрушила бы разбор всего файла на валидации.
+
+class _ExtractedCourseMCQ(BaseModel):
+    question: str = Field(description="Текст вопроса без номера и без меток оформления")
+    options: list[str] = Field(description="Варианты ответа по порядку, без букв/номеров и меток оформления")
+    marked_answers: list[int] = Field(
+        description="Индексы (с 0) вариантов, которые ТЕКСТ ФАЙЛА помечает как верные; пусто, если пометки нет"
+    )
+    answer_evidence: str = Field(
+        description="Дословная пометка из файла, по которой определён ответ (например «Ответ: Б», «**б) …**»); пусто, если пометки нет"
+    )
+
+
+class _ExtractedUnsupported(BaseModel):
+    text: str = Field(description="Начало текста вопроса (до 100 символов)")
+    reason: str = Field(description="Почему не вопрос с выбором ответа: открытый, на соответствие, на ввод слова и т.п.")
+
+
+class _CourseExtraction(BaseModel):
+    questions: list[_ExtractedCourseMCQ]
+    unsupported: list[_ExtractedUnsupported] = Field(default_factory=list)
+
+
+_SYSTEM_PROMPT_COURSE_EXTRACT = (
+    "Ты помогаешь сотруднику вуза привести тестовые вопросы преподавателей "
+    "к единому формату. Файлы написаны по-разному: правильный ответ отмечают "
+    "кто как. Твоя задача — ТОЧНО перенести то, что написано, а не решать "
+    "вопросы.\n\n"
+    "1. Найди ВСЕ вопросы с вариантами ответа, в порядке появления в тексте. "
+    "Формулировки не меняй. Из текста вопроса убери номер («12.», «Вопрос 3»), "
+    "из вариантов — буквы и номера («а)», «B.», «2)»), из обоих — служебные метки "
+    "и пометки правильности («*», «(+)», «(верно)») и метки оформления "
+    "(**, __, ==, {~ ~}).\n\n"
+    "2. Правильный ответ определяй ТОЛЬКО по пометке в тексте. Варианты пометки: "
+    "слова «Ответ: Б», «Правильный ответ — 2», «верно»/«правильно» рядом с вариантом; "
+    "символы «*», «+», «(+)», «✓» рядом с вариантом; ключ ответов отдельным списком "
+    "(например «Ответы: 1-б, 2-а, 3-г» или таблица «№ — ответ») — сопоставляй по "
+    "номерам вопросов; оформление: если среди вариантов ОДНОГО вопроса только "
+    "часть выделена (жирным, подчёркиванием, маркером, цветом) — выделенные и есть "
+    "верные. Если выделены ВСЕ варианты или выделен только текст самого вопроса — "
+    "это не пометка ответа.\n\n"
+    "3. Заполни marked_answers индексами (с 0) помеченных вариантов, а "
+    "answer_evidence — дословной пометкой из файла. Если пометки нет — "
+    "marked_answers пустой, answer_evidence пустая строка. НИКОГДА не выбирай "
+    "ответ сам, опираясь на свои знания или здравый смысл, и не угадывай. "
+    "Если отмечено несколько вариантов — перечисли их все.\n\n"
+    "4. Вопросы без вариантов ответа (открытые, эссе, на соответствие, "
+    "«вставьте слово», задачи) не включай в questions — перечисли в unsupported "
+    "с кратким reason.\n\n"
+    "5. Если вопрос в начале или конце текста обрывается (не хватает начала, "
+    "вариантов или ответа) — пропусти его целиком: он будет в соседнем фрагменте. "
+    "Не дублируй один и тот же вопрос.\n\n"
+    "6. Если в тексте нет вопросов — верни пустые списки."
+)
+
+
 _SYSTEM_PROMPT_EXTRACT_TEMPLATE = (
     "Ты помогаешь преподавателю привести уже готовые тестовые "
     "вопросы к структурированному формату. В тексте ниже могут "
@@ -219,7 +280,13 @@ class BotHubClient:
             timeout=60.0,
         )
 
-    def _call_structured(self, system_prompt: str, user_prompt: str, schema_cls: type[BaseModel]) -> BaseModel:
+    def _call_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        schema_cls: type[BaseModel],
+        max_tokens: int | None = None,
+    ) -> BaseModel:
         """
         Запрашивает у модели ответ, разобранный по schema_cls.
 
@@ -237,12 +304,19 @@ class BotHubClient:
             f"следующей JSON Schema:\n{schema_json}"
         )
 
+        request_kwargs = {}
+        if max_tokens is not None:
+            # Длинный ответ (десятки вопросов) иначе может молча обрезаться на
+            # лимите по умолчанию, и JSON придёт оборванным.
+            request_kwargs["max_tokens"] = max_tokens
+
         completion = self._client.chat.completions.create(
             model=Config.BOTHUB_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt + format_instruction},
                 {"role": "user", "content": user_prompt},
             ],
+            **request_kwargs,
         )
 
         usage = completion.usage
@@ -331,6 +405,21 @@ class BotHubClient:
             self._to_app_model(item, question_type, source_pages or [])
             for item in parsed.questions
         ]
+
+    def extract_course_questions(self, text: str) -> "_CourseExtraction":
+        """
+        Находит в тексте файла преподавателя вопросы с вариантами ответа и
+        пометки правильных ответов (для режима «Тест для курса»).
+
+        Возвращает ВСЁ, что модель увидела, включая вопросы без пометки ответа:
+        отбор по правилам Aiken делает src/course_pipeline.py.
+        """
+        return self._call_structured(
+            system_prompt=_SYSTEM_PROMPT_COURSE_EXTRACT + "\n\n" + EMPHASIS_LEGEND,
+            user_prompt=f"Текст с вопросами:\n\n{text}",
+            schema_cls=_CourseExtraction,
+            max_tokens=8000,
+        )
 
     @staticmethod
     def _to_app_model(item, question_type: QuestionType, source_pages: list[int]) -> Question:

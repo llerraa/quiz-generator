@@ -34,6 +34,70 @@ import pdfplumber
 MIN_CHARS_PER_PAGE = 20
 
 
+# Допуск по вертикали (в пунктах PDF), в пределах которого слова считаются
+# одной строкой при сборке текста с метками оформления.
+_LINE_TOLERANCE = 3.0
+
+
+def _is_bold_font(fontname: str | None) -> bool:
+    return bool(fontname) and "bold" in fontname.lower()
+
+
+def _is_coloured(color) -> bool:
+    """Заметно «цветной» (не чёрный/серый/белый) шрифт — только для RGB-цвета."""
+    if isinstance(color, (tuple, list)) and len(color) == 3:
+        return (max(color) - min(color)) > 0.25
+    return False
+
+
+def _page_text_with_emphasis(page) -> tuple[str, bool]:
+    """
+    Текст страницы, где жирные и цветные слова обёрнуты метками **…** и {~…~}.
+
+    Возвращает (текст, были_ли_метки). Если выделений на странице нет, вызывающий
+    код использует обычный extract_text(): он лучше держит порядок текста, и
+    нет смысла рисковать им ради страницы без выделений.
+
+    Подчёркивание и выделение маркером в PDF — отдельные нарисованные линии
+    и прямоугольники, а не свойства букв, поэтому здесь не распознаются.
+    """
+    words = page.extract_words(extra_attrs=["fontname", "non_stroking_color"])
+    if not words:
+        return "", False
+
+    words.sort(key=lambda w: (round(w["top"]), w["x0"]))
+    lines: list[list[dict]] = []
+    for word in words:
+        if lines and abs(word["top"] - lines[-1][0]["top"]) <= _LINE_TOLERANCE:
+            lines[-1].append(word)
+        else:
+            lines.append([word])
+
+    found = False
+    out_lines: list[str] = []
+    for line in lines:
+        line.sort(key=lambda w: w["x0"])
+        pieces: list[tuple[tuple[bool, bool], list[str]]] = []
+        for w in line:
+            flags = (_is_bold_font(w.get("fontname")), _is_coloured(w.get("non_stroking_color")))
+            if pieces and pieces[-1][0] == flags:
+                pieces[-1][1].append(w["text"])
+            else:
+                pieces.append((flags, [w["text"]]))
+        rendered: list[str] = []
+        for (bold, coloured), texts in pieces:
+            chunk = " ".join(texts)
+            if bold:
+                chunk = f"**{chunk}**"
+                found = True
+            if coloured:
+                chunk = f"{{~{chunk}~}}"
+                found = True
+            rendered.append(chunk)
+        out_lines.append(" ".join(rendered))
+    return "\n".join(out_lines), found
+
+
 @dataclass
 class PageContent:
     """Извлечённый текст одной страницы PDF."""
@@ -62,12 +126,15 @@ class ParsedDocument:
         return any(p.likely_scanned for p in self.pages)
 
 
-def parse_pdf(file_path: str | Path) -> ParsedDocument:
+def parse_pdf(file_path: str | Path, mark_emphasis: bool = False) -> ParsedDocument:
     """
     Извлекает текст из PDF постранично.
 
     Args:
         file_path: путь к PDF-файлу лекции.
+        mark_emphasis: помечать жирные и цветные слова метками **…** и {~…~}
+            (нужно для файлов с вопросами, где верный ответ выделен
+            оформлением). Для лекций выключено.
 
     Returns:
         ParsedDocument со списком страниц и их текстом.
@@ -94,6 +161,10 @@ def parse_pdf(file_path: str | Path) -> ParsedDocument:
                 # символов (почти сплошные пробелы) с layout=True. Ломало и подсчёт
                 # длины для likely_scanned, и группировку в чанки.
                 raw_text = page.extract_text() or ""
+                if mark_emphasis:
+                    marked_text, has_marks = _page_text_with_emphasis(page)
+                    if has_marks:
+                        raw_text = marked_text
                 cleaned = raw_text.strip()
 
                 pages.append(
