@@ -91,3 +91,18 @@ def test_moodle_xml_short_answer_marks_sample_answer_correct():
 def test_moodle_xml_empty_list_still_produces_valid_xml():
     root = ET.fromstring(questions_to_moodle_xml([]))
     assert root.findall("question") == []
+
+
+def test_moodle_xml_category_comes_first_and_has_course_prefix():
+    questions = [MultipleChoiceQuestion(question="Q1?", options=["A", "B"], correct_index=0)]
+    root = ET.fromstring(questions_to_moodle_xml(questions, category="Промежуточная аттестация 2026"))
+    first = root.find("question")
+    assert first.get("type") == "category"
+    assert first.find("category/text").text == "$course$/Промежуточная аттестация 2026"
+    assert len(root.findall("question")) == 2
+
+
+def test_moodle_xml_without_category_has_no_category_element():
+    questions = [MultipleChoiceQuestion(question="Q1?", options=["A", "B"], correct_index=0)]
+    root = ET.fromstring(questions_to_moodle_xml(questions))
+    assert all(q.get("type") != "category" for q in root.findall("question"))

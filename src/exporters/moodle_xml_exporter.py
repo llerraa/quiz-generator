@@ -124,18 +124,31 @@ def _add_essay_question(quiz: ET.Element, index: int, q: EssayQuestion) -> None:
     ET.SubElement(answer, "text").text = ""
 
 
-def questions_to_moodle_xml(questions: list[Question]) -> str:
+def questions_to_moodle_xml(questions: list[Question], category: str | None = None) -> str:
     """
     Собирает Moodle XML из списка вопросов.
 
     Args:
         questions: список вопросов любого из пяти типов (см. src/models.py).
+        category: название папки в банке вопросов курса, куда Moodle положит вопросы
+            (например, «Промежуточная аттестация 2026»). Если папки ещё нет, Moodle
+            создаст её при импорте. None — файл без папки, вопросы попадут в
+            «По умолчанию» курса.
 
     Returns:
         Готовая XML-строка для импорта через
         "Банк вопросов → Импорт → формат Moodle XML".
     """
     quiz = ET.Element("quiz")
+
+    if category:
+        # Служебная запись «category» задаёт папку для всех вопросов ниже.
+        # Без слова top: так её понимает и импорт в интерфейсе, и плагин
+        # local_questions_importer_ws.
+        cat_question = ET.SubElement(quiz, "question")
+        cat_question.set("type", "category")
+        cat_el = ET.SubElement(cat_question, "category")
+        ET.SubElement(cat_el, "text").text = f"$course$/{category.strip().strip('/')}"
 
     for i, q in enumerate(questions, start=1):
         if isinstance(q, MultipleChoiceQuestion):

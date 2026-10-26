@@ -43,6 +43,13 @@ class Config:
     # итог может превысить лимит на стоимость одного запроса. 0 — без лимита.
     COURSE_MAX_CAPS: float = float(os.getenv("COURSE_MAX_CAPS", "20000"))
 
+    # Moodle (ЭИОС): адрес сайта без слова /webservice и токен веб-службы.
+    # Токен — как пароль: хранится только в .env, в Git не попадает.
+    MOODLE_URL: str | None = os.getenv("MOODLE_URL")
+    MOODLE_TOKEN: str | None = os.getenv("MOODLE_TOKEN")
+    # Папка в банке вопросов курса, куда кладётся тест.
+    MOODLE_CATEGORY: str = os.getenv("MOODLE_CATEGORY", "Промежуточная аттестация 2026")
+
     @classmethod
     def validate(cls) -> None:
         if not cls.BOTHUB_API_KEY:
