@@ -39,6 +39,7 @@ FUNCTIONS_NEEDED = [
     "mod_data_get_fields",
     "mod_data_get_entries",
     "mod_data_update_entry",
+    "core_course_get_courses_by_field",  # название курса в интерфейсе (без неё работает, но без названия)
 ]
 
 

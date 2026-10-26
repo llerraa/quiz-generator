@@ -69,6 +69,18 @@ class MoodleClient:
         data = self.call("core_webservice_get_site_info")
         return data  # type: ignore[return-value]
 
+    def course_name(self, course_id: int) -> str | None:
+        """
+        Полное название курса или None (курса нет, нет прав или функции нет в службе).
+        Нужно только для показа пользователю, поэтому ошибки не выбрасываем.
+        """
+        try:
+            data = self.call("core_course_get_courses_by_field", field="id", value=course_id)
+        except MoodleError:
+            return None
+        courses = data.get("courses", []) if isinstance(data, dict) else []
+        return (courses[0].get("fullname") or None) if courses else None
+
     def upload_draft(self, filename: str, content: bytes) -> int:
         """Загружает файл во временную папку пользователя, возвращает itemid."""
         data = self._post(

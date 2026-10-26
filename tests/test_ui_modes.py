@@ -1,57 +1,60 @@
 import pytest
 
 from src.ui_modes import (
-    COMPARISON_ROWS,
-    MODE_COURSE,
-    MODE_EXTRACT,
-    MODE_GENERATE,
+    COURSE_MODES,
+    MODE_FILE,
+    MODE_LECTURE,
+    MODE_POINTS,
+    MODE_REGISTRY,
     MODES,
-    render_mode_comparison_html,
+    SWITCH_OFF_LABEL,
+    SWITCH_ON_LABEL,
+    render_mode_description_html,
 )
 
 
-def test_three_distinct_modes_in_order():
-    assert MODES == [MODE_COURSE, MODE_GENERATE, MODE_EXTRACT]
+def test_three_distinct_sections_in_order():
+    assert MODES == [MODE_REGISTRY, MODE_FILE, MODE_LECTURE]
     assert len(set(MODES)) == 3
-    assert [m[0] for m in MODES] == ["1", "2", "3"]
 
 
-def test_every_row_describes_all_three_modes_and_nothing_is_empty():
-    for row in COMPARISON_ROWS:
-        assert len(row) == 4, row
-        assert all(cell.strip() for cell in row), row
+def test_every_section_has_three_short_points():
+    assert set(MODE_POINTS) == set(MODES)
+    for points in MODE_POINTS.values():
+        assert len(points) == 3
+        assert all(text.strip() for text, _ in points)
 
 
-def test_row_titles_are_unique():
-    titles = [row[0] for row in COMPARISON_ROWS]
-    assert len(titles) == len(set(titles))
+def test_key_point_is_bold_for_course_sections():
+    for mode in COURSE_MODES:
+        html = render_mode_description_html(mode)
+        assert html.count("<strong>") == 1
+    assert "<strong>" not in render_mode_description_html(MODE_LECTURE)
 
 
-@pytest.mark.parametrize("current", MODES)
-def test_exactly_the_current_column_is_highlighted(current):
-    html = render_mode_comparison_html(current)
-    # подсвечены заголовок и по одной ячейке в каждой строке
-    assert html.count("class='is-current'") == 1 + len(COMPARISON_ROWS)
-    index = MODES.index(current)
-    first_row_cell = COMPARISON_ROWS[0][1 + index]
-    assert f"<td class='is-current'>{first_row_cell}</td>" in html
+def test_course_sections_are_registry_and_file():
+    assert COURSE_MODES == (MODE_REGISTRY, MODE_FILE)
 
 
-def test_all_mode_names_are_in_header():
-    html = render_mode_comparison_html(MODE_COURSE)
-    for mode in MODES:
-        assert mode in html
+@pytest.mark.parametrize("mode", MODES)
+def test_description_html_is_a_list_with_all_points(mode):
+    html = render_mode_description_html(mode)
+    assert html.startswith("<ul") and html.count("<li>") == 3
+
+
+def test_switch_labels_are_distinct():
+    assert SWITCH_OFF_LABEL != SWITCH_ON_LABEL
 
 
 def test_text_is_escaped(monkeypatch):
     import src.ui_modes as ui
 
-    monkeypatch.setattr(ui, "COMPARISON_ROWS", [("Строка <b>", "<script>x</script>", "a & b", "c")])
-    html = ui.render_mode_comparison_html(MODE_COURSE)
-    assert "<script>" not in html and "<b>" not in html
+    monkeypatch.setitem(ui.MODE_POINTS, MODE_FILE, [("<script>x</script> a & b", True)])
+    html = ui.render_mode_description_html(MODE_FILE)
+    assert "<script>" not in html
     assert "&lt;script&gt;" in html and "a &amp; b" in html
 
 
 def test_unknown_mode_raises():
     with pytest.raises(ValueError):
-        render_mode_comparison_html("что-то другое")
+        render_mode_description_html("что-то другое")
