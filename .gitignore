@@ -23,3 +23,7 @@ data/output/
 
 # OS
 .DS_Store
+
+# Журнал загрузок в Moodle (локальный)
+data/moodle_uploads.json
+tmp_moodle_files/

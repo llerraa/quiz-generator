@@ -30,6 +30,7 @@ from src.exporters.json_exporter import questions_to_json
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
 from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.bothub_client import BotHubClient
+from src.moodle.panel import render_moodle_panel
 from src.models import QuestionType
 from src.ui_modes import (
     MODE_COURSE as _MODE_COURSE,
@@ -891,6 +892,10 @@ if st.session_state.get("questions"):
                 mime="application/xml",
                 help="Формат для автоматической загрузки в курс; импорт в Moodle проверен на практике.",
             )
+        render_moodle_panel(
+            questions_only, file_stem,
+            st.session_state.get("course_result"), st.session_state.get("course_usage"),
+        )
     else:
         col_dl1, col_dl2, col_dl3, col_dl4, col_dl5 = st.columns(5)
         with col_dl1:
