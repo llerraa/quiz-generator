@@ -31,6 +31,11 @@ class Config:
     CAPS_PER_OUTPUT_TOKEN: float = float(os.getenv("BOTHUB_CAPS_PER_OUTPUT_TOKEN", "4.5633"))
     RUB_PER_CAP: float = float(os.getenv("BOTHUB_RUB_PER_CAP", "0.0001"))
 
+    # BotHub отбрасывает системное сообщение (инструкция до модели не доходит, модель отвечает
+    # обычным текстом). Поэтому по умолчанию инструкция и текст идут одним сообщением
+    # пользователя. 0 — вернуть отдельное системное сообщение.
+    SYSTEM_IN_USER: bool = os.getenv("BOTHUB_SYSTEM_IN_USER", "1").strip().lower() in ("1", "true", "yes")
+
     # Защита от случайного большого расхода: файл длиннее этого числа символов
     # в режиме «Тест для курса» не обрабатывается ИИ (файлы Aiken не ограничены).
     COURSE_MAX_CHARS: int = int(os.getenv("COURSE_MAX_CHARS", "60000"))

@@ -33,12 +33,13 @@ class UploadLog:
     def find(self, fp: str) -> dict | None:
         return self._read().get(fp)
 
-    def add(self, fp: str, course_id: int, category: str, questions: int) -> None:
+    def add(self, fp: str, course_id: int, category: str, questions: int, kind: str = "bank") -> None:
         data = self._read()
         data[fp] = {
             "course_id": course_id,
             "category": category,
             "questions": questions,
+            "kind": kind,  # "bank" — вопросы в банк, "quiz" — создан тест в курсе
             "when": datetime.now().strftime("%d.%m.%Y %H:%M"),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)

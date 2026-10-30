@@ -106,3 +106,18 @@ def test_moodle_xml_without_category_has_no_category_element():
     questions = [MultipleChoiceQuestion(question="Q1?", options=["A", "B"], correct_index=0)]
     root = ET.fromstring(questions_to_moodle_xml(questions))
     assert all(q.get("type") != "category" for q in root.findall("question"))
+
+
+def test_default_grade_added_to_every_question_but_not_to_category():
+    qs = [MultipleChoiceQuestion(question=f"Вопрос {i}?", options=["а", "б"], correct_index=0, source_pages=[1])
+          for i in range(3)]
+    root = ET.fromstring(questions_to_moodle_xml(qs, category="Папка", default_grade=2))
+    grades = [q.findtext("defaultgrade") for q in root.findall("question") if q.get("type") != "category"]
+    assert grades == ["2", "2", "2"]
+    assert root.find("question[@type='category']").find("defaultgrade") is None
+
+
+def test_default_grade_absent_by_default():
+    q = MultipleChoiceQuestion(question="Вопрос?", options=["а", "б"], correct_index=0, source_pages=[1])
+    root = ET.fromstring(questions_to_moodle_xml([q]))
+    assert root.find("question").find("defaultgrade") is None

@@ -3,9 +3,8 @@ Streamlit-интерфейс: три раздела (тест из реестр�
 просмотр результата и отправка теста в Moodle.
 
 Запуск: `streamlit run app.py`
-
-TODO: экспорт в QTI (src/exporters/qti_exporter.py — пока заглушка).
 """
+
 import html as html_lib
 import os
 import re
@@ -440,7 +439,7 @@ with col_hero:
 with col_visual:
     st.image("assets/imes_laptop_mockup.png", width="stretch")
 
-# --- Проверка ключа GigaChat заранее, а не в момент нажатия кнопки ---
+# --- Проверка ключа BotHub заранее, а не в момент нажатия кнопки ---
 if not Config.BOTHUB_API_KEY:
     st.error(
         "Не найден ключ BotHub. Скопируйте .env.example в .env и укажите "

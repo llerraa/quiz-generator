@@ -355,3 +355,59 @@ def test_no_limit_by_default_and_zero_means_unlimited(mock_openai_cls, monkeypat
         for _ in range(3):
             client.extract_questions(text="текст", question_type=QuestionType.MULTIPLE_CHOICE)
         assert client.usage.calls == 3
+
+
+# --- «инструкция не дошла до модели»: подсказка и запасной режим -------------------------
+
+def _text_completion(content: str, prompt_tokens: int):
+    completion = MagicMock()
+    completion.choices = [MagicMock(message=MagicMock(content=content))]
+    completion.usage.prompt_tokens = prompt_tokens
+    completion.usage.completion_tokens = 800
+    completion.usage.total_tokens = prompt_tokens + 800
+    return completion
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_prose_answer_with_tiny_prompt_gets_hint(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    mock_openai_cls.return_value.chat.completions.create.return_value = _text_completion(
+        "Проверил все вопросы — ответы указаны верно.", prompt_tokens=426)
+    with pytest.raises(ValueError) as exc:
+        BotHubClient().extract_course_questions("1. Вопрос?\nа) да\nб) нет")
+    assert "невалидный JSON" in str(exc.value)
+    assert "инструкция до модели не дошла" in str(exc.value)
+    assert "BOTHUB_SYSTEM_IN_USER" in str(exc.value)
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_prose_answer_with_normal_prompt_has_no_hint(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    mock_openai_cls.return_value.chat.completions.create.return_value = _text_completion(
+        "Проверил все вопросы.", prompt_tokens=2100)
+    with pytest.raises(ValueError) as exc:
+        BotHubClient().extract_course_questions("1. Вопрос?\nа) да\nб) нет")
+    assert "не дошла" not in str(exc.value)
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_system_in_user_sends_one_user_message(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    monkeypatch.setattr("src.llm.bothub_client.Config.SYSTEM_IN_USER", True)
+    create = mock_openai_cls.return_value.chat.completions.create
+    create.return_value = _text_completion('{"questions": [], "unsupported": []}', prompt_tokens=2100)
+    BotHubClient().extract_course_questions("1. Вопрос?\nа) да\nб) нет")
+    messages = create.call_args.kwargs["messages"]
+    assert [m["role"] for m in messages] == ["user"]
+    assert "Ты помогаешь сотруднику вуза" in messages[0]["content"]
+    assert "1. Вопрос?" in messages[0]["content"]
+
+
+@patch("src.llm.bothub_client.OpenAI")
+def test_default_sends_system_and_user_messages(mock_openai_cls, monkeypatch):
+    monkeypatch.setattr("src.llm.bothub_client.Config.BOTHUB_API_KEY", "fake-key")
+    monkeypatch.setattr("src.llm.bothub_client.Config.SYSTEM_IN_USER", False)
+    create = mock_openai_cls.return_value.chat.completions.create
+    create.return_value = _text_completion('{"questions": [], "unsupported": []}', prompt_tokens=2100)
+    BotHubClient().extract_course_questions("1. Вопрос?")
+    assert [m["role"] for m in create.call_args.kwargs["messages"]] == ["system", "user"]

@@ -348,12 +348,18 @@ class BotHubClient:
             # лимите по умолчанию, и JSON придёт оборванным.
             request_kwargs["max_tokens"] = max_tokens
 
+        full_system = system_prompt + format_instruction
+        if Config.SYSTEM_IN_USER:
+            messages = [{"role": "user", "content": f"{full_system}\n\n---\n\n{user_prompt}"}]
+        else:
+            messages = [
+                {"role": "system", "content": full_system},
+                {"role": "user", "content": user_prompt},
+            ]
+
         completion = self._client.chat.completions.create(
             model=Config.BOTHUB_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt + format_instruction},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=messages,
             **request_kwargs,
         )
 
@@ -370,7 +376,20 @@ class BotHubClient:
             self.usage.calls += 1
 
         raw_content = completion.choices[0].message.content
-        return self._parse_json_response(raw_content, schema_cls)
+        try:
+            return self._parse_json_response(raw_content, schema_cls)
+        except ValueError as exc:
+            # Признак «инструкция не дошла»: токенов на входе заметно меньше, чем символов
+            # в инструкции и тексте (по замерам русский текст — около 2 символов на токен).
+            expected = (len(full_system) + len(user_prompt)) // 4
+            got = int(usage.prompt_tokens or 0) if usage is not None else 0
+            if got and got < expected:
+                raise ValueError(
+                    f"{exc}\n\nПохоже, инструкция до модели не дошла: входных токенов {got}, "
+                    f"а ожидается не меньше {expected}. Проверьте BOTHUB_MODEL в .env и запустите ещё раз. "
+                    "Если повторяется, проверьте, что в .env нет строки BOTHUB_SYSTEM_IN_USER=0."
+                ) from exc
+            raise
 
     @staticmethod
     def _parse_json_response(raw_content: str, schema_cls: type[BaseModel]) -> BaseModel:

@@ -124,7 +124,8 @@ def _add_essay_question(quiz: ET.Element, index: int, q: EssayQuestion) -> None:
     ET.SubElement(answer, "text").text = ""
 
 
-def questions_to_moodle_xml(questions: list[Question], category: str | None = None) -> str:
+def questions_to_moodle_xml(questions: list[Question], category: str | None = None,
+                            default_grade: float | None = None) -> str:
     """
     Собирает Moodle XML из списка вопросов.
 
@@ -134,6 +135,8 @@ def questions_to_moodle_xml(questions: list[Question], category: str | None = No
             (например, «Промежуточная аттестация 2026»). Если папки ещё нет, Moodle
             создаст её при импорте. None — файл без папки, вопросы попадут в
             «По умолчанию» курса.
+        default_grade: баллы за каждый вопрос (например, 2). None — не указывать,
+            тогда Moodle поставит свой вариант по умолчанию (1 балл).
 
     Returns:
         Готовая XML-строка для импорта через
@@ -161,6 +164,12 @@ def questions_to_moodle_xml(questions: list[Question], category: str | None = No
             _add_essay_question(quiz, i, q)
         elif isinstance(q, ShortAnswerQuestion):
             _add_short_answer_question(quiz, i, q)
+        else:
+            continue
+        if default_grade is not None:
+            # Только что добавленный вопрос — последний в списке. Максимальная оценка теста
+            # складывается из этих баллов (плагин создания теста считает её по ним).
+            ET.SubElement(quiz[-1], "defaultgrade").text = f"{default_grade:g}"
 
     rough_string = ET.tostring(quiz, encoding="unicode")
     reparsed = minidom.parseString(rough_string)
