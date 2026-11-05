@@ -177,3 +177,50 @@ def test_quiz_settings_defaults_are_exam_friendly():
 def test_quiz_settings_can_hide_marks():
     config = QuizSettings(name="Т", show_marks=False).to_config(16)
     assert "marksimmediately" not in config
+
+
+# --- название дисциплины из «Полей из 1С» ------------------------------------------------
+
+def _course_client(courses):
+    class C(MoodleClient):
+        def call(self, function, **params):
+            assert function == "core_course_get_courses_by_field"
+            return {"courses": courses}
+    return C(base_url="https://m.example", token="T")
+
+
+def test_course_info_reads_discipline_from_custom_fields():
+    course = {"fullname": "Анатомия (ЛД, 2026)", "customfields": [
+        {"name": "Код дисциплины", "shortname": "code", "valueraw": "000000353"},
+        {"name": "Название дисциплины", "shortname": "disc", "valueraw": "<p>Анатомия и физиология ЦНС </p>"},
+    ]}
+    info = _course_client([course]).course_info(16)
+    assert info["name"] == "Анатомия (ЛД, 2026)"
+    assert info["discipline"] == "Анатомия и физиология ЦНС"
+    assert info["custom_fields"] == ["Код дисциплины", "Название дисциплины"]
+
+
+def test_course_info_finds_discipline_by_short_name_on_test_site():
+    # на m45 поле называется discipline_name, а discipline_code пустое
+    course = {"fullname": "Курс 16", "customfields": [
+        {"name": "discipline_code", "shortname": "discipline_code", "valueraw": ""},
+        {"name": "discipline_name", "shortname": "discipline_name", "valueraw": "d_name_test"},
+    ]}
+    assert _course_client([course]).course_info(16)["discipline"] == "d_name_test"
+
+
+def test_course_info_empty_discipline_field_is_none():
+    course = {"fullname": "К", "customfields": [{"name": "discipline_name", "shortname": "discipline_name", "valueraw": "  "}]}
+    info = _course_client([course]).course_info(16)
+    assert info["discipline"] is None and info["custom_fields"] == ["discipline_name"]
+
+
+def test_course_info_without_custom_field_or_course():
+    assert _course_client([{"fullname": "К"}]).course_info(1) == {"name": "К", "discipline": None, "custom_fields": []}
+    assert _course_client([]).course_info(1) == {"name": None, "discipline": None, "custom_fields": []}
+
+
+def test_quiz_title():
+    from src.moodle.client import quiz_title
+    assert quiz_title("Анатомия") == "Тест. Промежуточная аттестация по дисциплине Анатомия"
+    assert quiz_title("  ") == quiz_title(None) == "Тест. Промежуточная аттестация"

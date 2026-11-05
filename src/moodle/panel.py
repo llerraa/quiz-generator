@@ -9,10 +9,12 @@ import streamlit as st
 from src.config import Config
 from src.exporters.aiken_exporter import questions_to_aiken
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
-from src.moodle.client import QUIZ_SECTION_NAME, MoodleClient, MoodleError, QuizSettings
-from src.moodle.publish import UploadLog, can_publish, fingerprint, make_report
+from src.exporters.gift_exporter import questions_to_gift
+from src.moodle import registry_table as T
+from src.moodle.client import QUIZ_SECTION_NAME, MoodleClient, MoodleError, QuizSettings, quiz_title
+from src.moodle.publish import UploadLog, can_publish, fingerprint, make_report, make_rework_report
 from src.moodle.registry import (
-    F_COURSE_NAME, F_GROUP, F_SOURCE, F_TEACHER, STATUS_DONE, STATUS_NEW, STATUS_UPLOADED,
+    F_COURSE_NAME, F_GROUP, F_SOURCE, F_TEACHER, STATUS_BANK, STATUS_QUIZ, STATUS_REWORK,
     MoodleRegistry, RegistryEntry,
 )
 
@@ -67,13 +69,9 @@ def pick_registry_entry(on_file=None):
         st.info("Реестр не настроен: добавьте в .env строку MOODLE_REGISTRY_COURSE=17 (номер курса с базой данных).")
         return None
 
-    col_all, col_refresh, _ = st.columns([3, 2, 3], vertical_alignment="center")
-    with col_all:
-        show_all = st.checkbox("Отображать обработанные записи", key="registry_show_all")
-    with col_refresh:
-        if st.button("Обновить список", key="registry_refresh"):
-            st.session_state.pop("_registry_entries", None)
-            st.session_state.pop("_registry_files", None)
+    if st.button("Обновить список", key="registry_refresh"):
+        st.session_state.pop("_registry_entries", None)
+        st.session_state.pop("_registry_files", None)
 
     if "_registry_entries" not in st.session_state:
         try:
@@ -84,27 +82,56 @@ def pick_registry_entry(on_file=None):
             return None
     entries: list[RegistryEntry] = st.session_state["_registry_entries"]
 
-    shown = [e for e in entries if show_all or e.status in ("", STATUS_NEW)]
+    # Фильтры над таблицей
+    c_status, c_file, c_sort = st.columns([3, 2, 2])
+    with c_status:
+        statuses = st.multiselect("Статус", options=T.status_options(entries), default=T.DEFAULT_STATUSES,
+                                  key="registry_statuses")
+    with c_file:
+        file_filter = st.selectbox("Файл от зав кафедрой", T.FILE_CHOICES, key="registry_file_filter")
+    with c_sort:
+        sort_mode = st.selectbox("Порядок", T.SORT_CHOICES, key="registry_sort")
+    query = st.text_input("Поиск по названию курса, группе, преподавателю, кафедре или номеру курса", key="registry_query")
+
+    shown = T.sort_entries(T.filter_entries(entries, statuses, file_filter, query), sort_mode)
+    st.caption(f"Показано записей: {len(shown)} из {len(entries)}.")
     if not shown:
-        st.info("Необработанных записей в реестре нет. Включите «Отображать обработанные записи», чтобы увидеть все.")
+        st.info("Под выбранные фильтры записей нет. Добавьте статусы в фильтр «Статус», чтобы увидеть остальные.")
         return None
 
+    # Таблица: клик по строке выбирает запись (ссылка на курс открывается отдельным кликом по ячейке)
+    frame = T.entries_frame(shown)
+    event = st.dataframe(
+        frame,
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"registry_table_{len(shown)}_{abs(hash(tuple(e.entry_id for e in shown)))}",
+        column_config={
+            "Ссылка на курс": st.column_config.LinkColumn("Ссылка на курс", display_text="Открыть курс"),
+            "Изменено": st.column_config.DatetimeColumn("Изменено", format="DD.MM.YYYY HH:mm"),
+        },
+    )
+    clicked = event.selection.rows if event is not None and getattr(event, "selection", None) else []
+
     by_id = {e.entry_id: e for e in shown}
+    order = list(by_id)
     col_entry, col_file = st.columns([3, 2])
     with col_entry:
         chosen = st.selectbox(
-            "Запись реестра",
-            options=list(by_id),
+            "Запись реестра (кликните строку в таблице или выберите здесь)",
+            options=order,
+            index=clicked[0] if clicked and clicked[0] < len(order) else 0,
             format_func=lambda i: _entry_label(by_id[i]),
-            key="registry_entry_id",
         )
     entry = by_id[chosen]
 
     files = entry.files.get(F_SOURCE, [])
     with col_file:
-        st.markdown("<div class='imes-field-label'>Файл преподавателя</div>", unsafe_allow_html=True)
+        st.markdown("<div class='imes-field-label'>Файл от зав кафедрой</div>", unsafe_allow_html=True)
         if not files:
-            st.warning("В этой записи нет файла преподавателя.")
+            st.warning("В этой записи нет файла от зав кафедрой.")
             return None
         if entry.course_id is None:
             st.error("В записи нет корректной ссылки на курс (ожидается …/course/view.php?id=число).")
@@ -128,23 +155,44 @@ def pick_registry_entry(on_file=None):
 
 # --- Шаг «Отправить в Moodle» ------------------------------------------------------------
 
+def _course_info(client: MoodleClient, course_id: int) -> dict:
+    """Название курса и название дисциплины из полей курса (с запоминанием на сессию)."""
+    cache = st.session_state.setdefault("_course_info", {})
+    if course_id not in cache:
+        cache[course_id] = client.course_info(course_id)
+    return cache[course_id]
+
+
 def _course_title(client: MoodleClient, course_id: int, fallback: str = "") -> str:
     """Название курса из Moodle (с запоминанием на сессию); если не получилось, запасной вариант."""
-    cache = st.session_state.setdefault("_course_names", {})
-    if course_id not in cache:
-        cache[course_id] = client.course_name(course_id)
-    return cache[course_id] or fallback
+    return _course_info(client, course_id)["name"] or fallback
 
 
-def _quiz_settings_form(title: str) -> QuizSettings:
-    """Свёрнутый блок настроек теста: значения по умолчанию можно поменять перед созданием."""
+def _quiz_settings_form(discipline: str | None, course_id: int | None = None,
+                        custom_fields: list[str] | None = None) -> QuizSettings:
+    """
+    Свёрнутый блок настроек теста: значения по умолчанию можно поменять перед созданием.
+
+    discipline: «Название дисциплины» из полей курса (из 1С); из него собирается название теста.
+    """
     default = QuizSettings(name="")
     with st.expander("Настройки теста в курсе"):
         name = st.text_input(
             "Название теста",
-            value=f"Промежуточная аттестация: {title}" if title else "Промежуточная аттестация",
-            key="quiz_name",
+            value=quiz_title(discipline),
+            key=f"quiz_name_{course_id}_{abs(hash(discipline or ''))}",  # другой курс → название подставится заново
+            help="«Тест. Промежуточная аттестация по дисциплине …»; название дисциплины берётся из настроек курса, "
+                 "раздел «Поля из 1С».",
         )
+        if not discipline:
+            if custom_fields:
+                st.caption("В полях курса «Поля из 1С» не нашлось заполненного названия дисциплины (поле «Название "
+                           "дисциплины» или discipline_name). Moodle вернул поля: " + ", ".join(custom_fields)
+                           + ". Впишите название в название теста вручную.")
+            else:
+                st.caption("В полях курса «Поля из 1С» не нашлось названия дисциплины: Moodle не вернул дополнительных "
+                           "полей курса (проверьте, что поле заполнено и видно пользователю токена). "
+                           "Впишите название в название теста вручную.")
         c1, c2, c3 = st.columns(3)
         with c1:
             minutes = st.number_input("Время, минут (0 — без ограничения)", min_value=0, max_value=600,
@@ -161,7 +209,7 @@ def _quiz_settings_form(title: str) -> QuizSettings:
                               help="По умолчанию тест создаётся скрытым: его сначала проверяют и сами открывают.")
         st.caption("Проходного балла нет. После попытки студент видит оценку, но не правильные ответы.")
     return QuizSettings(
-        name=name.strip() or "Промежуточная аттестация",
+        name=name.strip() or quiz_title(discipline),
         visible=visible, attempts=int(attempts), time_limit_minutes=int(minutes),
         points_per_question=float(points), shuffle_questions=shuffle_q, shuffle_answers=shuffle_a,
     )
@@ -194,10 +242,26 @@ def _create_quiz(client: MoodleClient, course_id: int, category: str, questions,
     st.markdown(f"[Открыть тест в Moodle]({created['url']})")
     if entry is not None and registry is not None:
         try:
-            registry.set_status(entry.entry_id, STATUS_UPLOADED,
-                                report=make_report(result, usage, len(questions)) + f"\nТест создан в курсе: {created['url']}")
+            registry.set_status(entry.entry_id, STATUS_QUIZ,
+                                report=make_report(result, usage, len(questions), quiz_url=created["url"]))
         except MoodleError as exc:
             st.warning(f"Тест создан, но статус в базе данных не обновился: {exc}")
+
+
+def _rework_button(entry, registry, result) -> None:
+    """Кнопка «Отправить на доработку»: статус записи меняется, в отчёт попадают причины пропуска вопросов."""
+    if entry is None or registry is None:
+        return
+    st.markdown("<div class='imes-panel-sub'>Если файл не подходит (мало вопросов, нет пометок ответов), "
+                "отправьте его преподавателю на доработку: в записи появится статус и причины.</div>",
+                unsafe_allow_html=True)
+    if st.button("Отправить на доработку", key="moodle_rework",
+                 help="Статус записи: «Отправлен на доработку (тест не сформирован)», в отчёт попадут причины."):
+        try:
+            registry.set_status(entry.entry_id, STATUS_REWORK, report=make_rework_report(result))
+            st.success("Запись помечена: отправлен на доработку (тест не сформирован).")
+        except MoodleError as exc:
+            st.error(f"Не удалось обновить запись в базе данных: {exc}")
 
 
 def render_moodle_panel(
@@ -223,6 +287,7 @@ def render_moodle_panel(
     ok, why_not = can_publish(result)
     if not ok:
         st.error(why_not)
+        _rework_button(entry, registry, result)
         return
 
     try:
@@ -284,15 +349,23 @@ def render_moodle_panel(
         if entry is not None and registry is not None:
             if st.button("Добавить обработанный файл в базу данных", disabled=not confirmed,
                          key="moodle_save_registry",
-                         help="В запись реестра попадут файлы Moodle XML и Aiken, статус «Обработан» и отчёт."):
+                         help="В запись реестра попадут «Проверенный файл» (Aiken), «Файл (Gift) для заливки» и отчёт. "
+                              "Если вопросов меньше нормы, статус станет «Отправлен на доработку (тест не сформирован)», "
+                              "иначе не меняется: он меняется после загрузки в банк вопросов или создания теста."):
                 try:
+                    short = result is not None and getattr(result, "shortfall", 0) > 0
                     registry.save_result(
                         entry.entry_id,
                         xml_name=f"{file_stem}_moodle.xml", xml_text=xml_text,
                         aiken_name=f"{file_stem}_aiken.txt", aiken_text=questions_to_aiken(questions),
-                        status=STATUS_DONE, report=report,
+                        gift_name=f"{file_stem}_gift.txt", gift_text=questions_to_gift(questions),
+                        # Не хватает вопросов до нормы: запись уходит на доработку, тест не формируется
+                        status=STATUS_REWORK if short else None,
+                        report=make_rework_report(result) if short else report,
                     )
-                    st.success("Обработанный файл добавлен в базу данных.")
+                    st.success("Обработанные файлы добавлены в базу данных."
+                               + (" Вопросов меньше нормы: статус записи «Отправлен на доработку (тест не сформирован)»."
+                                  if short else ""))
                 except MoodleError as exc:
                     st.error(f"Не удалось добавить файл в базу данных: {exc}")
     with c_course:
@@ -304,7 +377,7 @@ def render_moodle_panel(
                 st.success(f"Вопросы загружены в курс № {course_id}. {message}")
                 if entry is not None and registry is not None:
                     try:
-                        registry.set_status(entry.entry_id, STATUS_UPLOADED)
+                        registry.set_status(entry.entry_id, STATUS_BANK)
                     except MoodleError as exc:
                         st.warning(f"Вопросы в курсе, но статус в базе данных не обновился: {exc}")
             except MoodleError as exc:
@@ -312,8 +385,11 @@ def render_moodle_panel(
 
     st.markdown("<div class='imes-panel-sub'>Или создайте готовый тест: вопросы попадут и в банк, и в новый тест "
                 f"в разделе «{html.escape(QUIZ_SECTION_NAME)}».</div>", unsafe_allow_html=True)
-    settings = _quiz_settings_form(title)
+    info = _course_info(client, course_id)
+    settings = _quiz_settings_form(info["discipline"], course_id, info.get("custom_fields"))
     if st.button("Создать тест в курсе", disabled=not confirmed, key="moodle_create_quiz",
                  help="Тест создаётся скрытым. Не нажимайте вместе с загрузкой в банк: вопросы задвоятся."):
         _create_quiz(client, course_id, category, questions, settings, log, fp, entry, registry,
                      result, usage, file_stem)
+
+    _rework_button(entry, registry, result)

@@ -42,7 +42,7 @@ def _mcq_block(q: MultipleChoiceQuestion) -> str:
     lines = [_one_line(q.question)]
     for letter, option in zip(_LETTERS, q.options):
         lines.append(f"{letter}. {_one_line(option)}")
-    lines.append(f"ANSWER: {_LETTERS[q.correct_index]}")
+    lines.append("ANSWER: " + ",".join(_LETTERS[i] for i in q.correct_indices))
     return "\n".join(lines)
 
 

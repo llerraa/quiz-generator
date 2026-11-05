@@ -3,7 +3,7 @@
 
 Единый формат, в который должен укладываться результат генерации —
 неважно, какой провайдер это делает (сейчас BotHub/Claude). Экспортёры
-(JSON/Excel/QTI) тоже работают именно с этими моделями, а не с сырым
+(JSON, Moodle XML, Aiken, GIFT) тоже работают именно с этими моделями, а не с сырым
 текстом ответа LLM — это и есть та самая "граница" между слоем llm/
 и слоем export/, о которой мы говорили в архитектуре.
 """
@@ -22,14 +22,25 @@ class QuestionType(str, Enum):
 
 
 class MultipleChoiceQuestion(BaseModel):
-    """Вопрос с несколькими вариантами ответа, один из которых верный."""
+    """Вопрос с несколькими вариантами ответа: верный один или (в тестах для курса) два."""
 
     type: Literal[QuestionType.MULTIPLE_CHOICE] = QuestionType.MULTIPLE_CHOICE
     question: str
     options: list[str] = Field(min_length=2, max_length=6)
     correct_index: int  # индекс правильного варианта в списке options (с 0)
+    also_correct: list[int] = Field(default_factory=list)  # ещё верные варианты (если верных два)
     explanation: str | None = None  # объяснение от модели — для быстрой проверки человеком
     source_pages: list[int] = Field(default_factory=list)
+
+    @property
+    def correct_indices(self) -> list[int]:
+        """Все верные варианты по возрастанию (для вопроса с одним ответом — список из одного номера)."""
+        return sorted({self.correct_index, *self.also_correct})
+
+    @property
+    def is_multi(self) -> bool:
+        """Верных вариантов несколько (в Moodle это вопрос с флажками, а не с переключателями)."""
+        return len(self.correct_indices) > 1
 
 
 class TrueFalseQuestion(BaseModel):

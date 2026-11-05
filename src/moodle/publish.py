@@ -13,6 +13,11 @@ from pathlib import Path
 
 DEFAULT_LOG = Path("data") / "moodle_uploads.json"
 
+# Строка в конце отчёта, пока тест в курсе ещё не создан. Преподаватели вопросы не проверяют,
+# поэтому по умолчанию строки нет; если понадобится напоминание, впишите сюда текст,
+# например "Требуется выборочная проверка вопросов."
+REVIEW_NOTE = ""
+
 
 def fingerprint(course_id: int, category: str, xml_text: str) -> str:
     """Отпечаток «курс + папка + содержимое теста»: если всё то же — это повторная загрузка."""
@@ -46,22 +51,43 @@ class UploadLog:
         self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def make_report(result=None, usage=None, questions_count: int = 0) -> str:
-    """Короткий текст для колонки «Отчёт» в реестре."""
+def make_report(result=None, usage=None, questions_count: int = 0, *, quiz_url: str | None = None) -> str:
+    """
+    Текст для колонки «Отчёт» в реестре.
+
+    Расход ИИ в отчёт не пишем (он нужен только тому, кто запускает приложение, и виден на экране).
+    Последняя строка: ссылка на созданный тест (если он создан) или REVIEW_NOTE (по умолчанию пусто).
+    """
     lines: list[str] = []
     if result is not None:
         lines.append(f"Вошло вопросов: {len(result.questions)} из {result.target}.")
         if result.skipped:
-            lines.append(f"Пропущено: {len(result.skipped)} (не подходят под формат: один верный ответ из списка).")
+            lines.append(f"Пропущено: {len(result.skipped)} (не подходят под формат: выбор из списка, 1 или 2 верных ответа).")
         if result.errors:
             lines.append(f"Ошибок при разборе фрагментов: {len(result.errors)}.")
-        lines.append("Ответы прочитаны кодом из Aiken, без ИИ." if result.source == "aiken"
-                     else "Пометки ответов найдены ИИ в файле преподавателя.")
     else:
         lines.append(f"Вопросов: {questions_count}.")
-    if usage is not None and getattr(usage, "calls", 0):
-        lines.append(f"Расход ИИ ≈ {usage.estimated_caps:.0f} CAPS.")
-    lines.append("Требуется выборочная проверка вопросов преподавателем.")
+    if quiz_url:
+        lines.append(f"Тест создан в курсе: {quiz_url}")
+    elif REVIEW_NOTE:
+        lines.append(REVIEW_NOTE)
+    return "\n".join(lines)
+
+
+def make_rework_report(result=None, limit: int = 8) -> str:
+    """Отчёт для статуса «Отправлен на доработку»: что не так с файлом преподавателя."""
+    lines: list[str] = []
+    if result is not None:
+        lines.append(f"Вошло вопросов: {len(result.questions)} из {result.target}.")
+        if getattr(result, "shortfall", 0) > 0:
+            lines.append(f"Не хватает вопросов: {result.shortfall}.")
+        for item in result.skipped[:limit]:
+            title = f"«{item.title}»: " if getattr(item, "title", "") else ""
+            lines.append(f"- {title}{item.reason}")
+        rest = len(result.skipped) - limit
+        if rest > 0:
+            lines.append(f"- … и ещё пропущено: {rest}")
+    lines.append("Тест не сформирован: файл отправлен преподавателю на доработку.")
     return "\n".join(lines)
 
 

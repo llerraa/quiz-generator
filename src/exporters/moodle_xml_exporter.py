@@ -4,14 +4,8 @@
 Это "родной" формат самой Moodle (Банк вопросов → Импорт → Moodle XML),
 придуманный разработчиками Moodle специально для импорта вопросов в неё же —
 в отличие от QTI, здесь нет риска несовместимости между разными
-интерпретациями стандарта.
-
-Понадобился этот отдельный экспортёр после того, как реальный Moodle не
-опознал вопросы в QTI 1.2 файле ("В импортируемом файле нет вопросов") —
-у Moodle QTI-импорт исторически не полностью совместим с общим стандартом,
-требует специфичных внутренних служебных полей. QTI-экспортёр (qti_exporter.py)
-не удалён — он покрывает требование задания РУДН про формат "QTI" по имени
-и может пригодиться для других LMS.
+интерпретациями стандарта. (Экспорт в QTI 1.2 был убран: реальный Moodle не
+опознавал такие файлы, а ИМЭС этот формат не нужен.)
 
 Источник структуры формата: официальная документация Moodle
 (docs.moodle.org/en/Moodle_XML_format).
@@ -19,6 +13,7 @@
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 
+from src.exporters.multichoice_weights import choice_weights, format_weight
 from src.models import (
     EssayQuestion,
     MatchingQuestion,
@@ -49,12 +44,14 @@ def _add_mc_question(quiz: ET.Element, index: int, q: MultipleChoiceQuestion) ->
     question.set("type", "multichoice")
     _add_common_tags(question, _short_name(q.question), q.question)
 
-    for i, opt in enumerate(q.options):
+    # Два верных ответа: флажки, веса 50 / -50 (сумма 0), как в GIFT-файле. Один верный: переключатель.
+    weights = choice_weights(len(q.options), q.correct_indices)
+    for opt, weight in zip(q.options, weights):
         answer = ET.SubElement(question, "answer")
-        answer.set("fraction", "100" if i == q.correct_index else "0")
+        answer.set("fraction", format_weight(weight))
         ET.SubElement(answer, "text").text = opt
 
-    ET.SubElement(question, "single").text = "true"
+    ET.SubElement(question, "single").text = "false" if q.is_multi else "true"
     ET.SubElement(question, "shuffleanswers").text = "1"
     ET.SubElement(question, "answernumbering").text = "abc"
 

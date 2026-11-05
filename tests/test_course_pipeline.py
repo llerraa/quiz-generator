@@ -94,7 +94,7 @@ def test_valid_question_is_accepted_with_evidence():
     "item, expected_reason",
     [
         (mcq(answers=(), evidence=""), "не найдена пометка"),
-        (mcq(answers=(0, 2)), "несколько верных"),
+        (mcq(options=tuple("абвг"), answers=(0, 1, 2)), "допускается 1 или 2"),
         (mcq(answers=(5,)), "несуществующий вариант"),
         (mcq(answers=(1,), evidence="  "), "не удалось подтвердить"),
         (mcq(options=("только один",), answers=(0,)), "меньше двух"),
@@ -119,7 +119,7 @@ def test_good_and_bad_questions_mixed_nothing_lost_silently():
         mcq("Хороший 1?"),
         mcq("Без ответа?", answers=(), evidence=""),
         mcq("Хороший 2?"),
-        mcq("Два ответа?", answers=(0, 1)),
+        mcq("Три ответа?", answers=(0, 1, 2)),
     ]
     result = prepare_course_test("текст", fake(*items))
     assert [q.question for q in result.questions] == ["Хороший 1?", "Хороший 2?"]
@@ -256,3 +256,10 @@ def test_no_budget_error_on_normal_run():
     result = prepare_course_test(_long_text(200), fake(mcq()))
     assert result.budget_error == ""
     assert result.chunks_done == result.chunks_total
+
+
+def test_two_marked_answers_make_a_multi_question():
+    result = prepare_course_test("любой текст", fake(mcq(options=tuple("абвг"), answers=(3, 1), evidence="*б, *г")))
+    q = result.questions[0]
+    assert q.correct_indices == [1, 3] and q.is_multi
+    assert result.skipped == []

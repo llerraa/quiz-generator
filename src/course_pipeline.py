@@ -2,7 +2,7 @@
 Подготовка теста для курса из файла преподавателя (режим «Тест для курса»).
 
 Задача: преподаватель положил файл с готовыми вопросами в любом оформлении,
-а на выходе нужен тест из до 25 вопросов в формате Aiken (один верный ответ).
+а на выходе нужен тест из до 25 вопросов в формате Aiken (1 или 2 верных ответа).
 
 Правила:
   - файл уже в формате Aiken → читаем обычным кодом, без модели;
@@ -15,7 +15,7 @@
 
 Причины пропуска вопроса:
   - не найдена пометка правильного ответа;
-  - отмечено несколько верных ответов (в Aiken он только один);
+  - отмечено больше двух верных ответов (по инструкции ИМЭС верных 1 или 2);
   - число вариантов не от 2 до 6;
   - вопрос без вариантов ответа (открытый, на соответствие и т.п.);
   - ошибка формата в самом файле Aiken.
@@ -25,7 +25,7 @@ from typing import Callable
 
 from src.budget import BudgetExceeded
 from src.models import MultipleChoiceQuestion, TrueFalseQuestion
-from src.parsing.aiken_parser import looks_like_aiken, parse_aiken
+from src.parsing.aiken_parser import MAX_CORRECT, looks_like_aiken, parse_aiken
 
 TARGET_QUESTIONS = 25
 CHUNK_CHARS = 6000
@@ -117,16 +117,16 @@ def _classify(item) -> tuple[MultipleChoiceQuestion | None, str | None]:
     answers = sorted(set(item.marked_answers))
     if not answers:
         return None, "не найдена пометка правильного ответа"
-    if len(answers) > 1:
-        return None, "отмечено несколько верных ответов (в Aiken он только один)"
-    if not 0 <= answers[0] < len(options):
+    if len(answers) > MAX_CORRECT:
+        return None, f"отмечено верных ответов: {len(answers)} (допускается 1 или 2)"
+    if not all(0 <= a < len(options) for a in answers):
         return None, "пометка указывает на несуществующий вариант"
     if not item.answer_evidence.strip():
         # Ответ назван, а пометки-основания нет: похоже на догадку модели
         return None, "не удалось подтвердить пометку ответа в тексте файла"
 
     return MultipleChoiceQuestion(
-        question=question_text, options=options, correct_index=answers[0]
+        question=question_text, options=options, correct_index=answers[0], also_correct=answers[1:]
     ), None
 
 

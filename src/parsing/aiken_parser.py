@@ -12,6 +12,8 @@
     B. вариант
     ANSWER: B
 
+Верных ответов может быть один («ANSWER: B») или два («ANSWER: B,D»), как в инструкции ИМЭС.
+
 Вопросы отделяются пустой строкой. Парсер терпимее самой Moodle:
   - принимает `A.` и `A)` у вариантов;
   - принимает `ANSWER:` в любом регистре;
@@ -32,7 +34,9 @@ from src.models import MultipleChoiceQuestion, TrueFalseQuestion
 
 _OPTION_RE = re.compile(r"^\s*([A-Za-z])[.)]\s+(\S.*)$")
 _ANSWER_LINE_RE = re.compile(r"^\s*ANSWER\s*:(.*)$", re.IGNORECASE)
-_ANSWER_VALUE_RE = re.compile(r"^\s*([A-Za-z])\s*[.)]?\s*$")
+# Значение после ANSWER: одна буква («B») или несколько через запятую («B,D», «B, D»).
+_ANSWER_LETTERS_RE = re.compile(r"^\s*[A-Za-z](\s*[,;]\s*[A-Za-z])*\s*[.)]?\s*$")
+MAX_CORRECT = 2  # по инструкции ИМЭС верных вариантов в вопросе 1 или 2
 
 # Пары вариантов, по которым вопрос узнаётся как «верно/неверно».
 # Сравниваем без регистра и без точки в конце.
@@ -104,21 +108,27 @@ def _build_question(
     if len(options) > 6:
         return None, f"{label}: больше 6 вариантов ({len(options)}) — приложение их не поддерживает."
 
-    m = _ANSWER_VALUE_RE.match(answer_value)
-    if not m:
+    if not _ANSWER_LETTERS_RE.match(answer_value):
         return None, (
-            f"{label}: после ANSWER: ожидается одна буква (например, «ANSWER: B»), "
-            f"а в файле «{answer_value.strip()}». Aiken не умеет несколько верных ответов."
+            f"{label}: после ANSWER: ожидаются буквы вариантов (например, «ANSWER: B» или «ANSWER: B,D»), "
+            f"а в файле «{answer_value.strip()}»."
         )
-    index = ord(m.group(1).upper()) - ord("A")
-    if index >= len(options):
+    letters = sorted({ch.upper() for ch in re.findall(r"[A-Za-z]", answer_value)})
+    if len(letters) > MAX_CORRECT:
         return None, (
-            f"{label}: ответ «{m.group(1).upper()}» указывает на несуществующий вариант "
+            f"{label}: верных ответов {len(letters)} («{', '.join(letters)}»), а допускается 1 или 2."
+        )
+    indices = [ord(letter) - ord("A") for letter in letters]
+    bad = [letter for letter, i in zip(letters, indices) if i >= len(options)]
+    if bad:
+        return None, (
+            f"{label}: ответ «{bad[0]}» указывает на несуществующий вариант "
             f"(в вопросе вариантов: {len(options)})."
         )
+    index = indices[0]
 
     # Вопрос с вариантами «Верно/Неверно» превращаем обратно в тип «верно/неверно».
-    if len(options) == 2:
+    if len(options) == 2 and len(indices) == 1:
         normalized = [_normalize_option(o) for o in options]
         for true_label, false_label in _TF_PAIRS:
             if sorted(normalized) == sorted([true_label, false_label]):
@@ -126,7 +136,7 @@ def _build_question(
                 return TrueFalseQuestion(statement=question_text, is_true=(chosen == true_label)), None
 
     return MultipleChoiceQuestion(
-        question=question_text, options=options, correct_index=index
+        question=question_text, options=options, correct_index=index, also_correct=indices[1:]
     ), None
 
 

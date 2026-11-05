@@ -34,7 +34,7 @@ def _registry_script():
         st.write(f"course={picked[1].course_id} name={picked[2]} size={len(picked[3])}")
 
 
-def _run(show_all: bool = False) -> AppTest:
+def _run(show_all: bool = False, file_filter: str | None = None) -> AppTest:
     """Скрипт подменяет классы Moodle глобально, поэтому после запуска всё возвращаем как было."""
     import inspect, os, textwrap
 
@@ -47,9 +47,12 @@ def _run(show_all: bool = False) -> AppTest:
     src = textwrap.dedent(inspect.getsource(_registry_script)).replace("ROOT_PLACEHOLDER", repr(ROOT))
     try:
         at = AppTest.from_string(src + "\n_registry_script()\n", default_timeout=30)
+        at.run()
         if show_all:
-            at.session_state["registry_show_all"] = True
-        return at.run()
+            at.multiselect(key="registry_statuses").set_value(["Не обработан", "(без статуса)", "Обработан"]).run()
+        if file_filter:
+            at.selectbox(key="registry_file_filter").select(file_filter).run()
+        return at
     finally:
         (R.MoodleRegistry.entries, R.MoodleRegistry.download, P.MoodleClient,
          Config.MOODLE_URL, Config.MOODLE_TOKEN, env) = saved
@@ -62,16 +65,28 @@ def _run(show_all: bool = False) -> AppTest:
 def test_registry_lists_only_unprocessed_by_default():
     at = _run()
     assert not at.exception, at.exception
-    options = at.selectbox[0].options
+    table = at.dataframe[0].value
+    assert list(table["Курс"]) == ["Курс А"] and list(table["Статус"]) == ["Не обработан"]
+    assert table["Ссылка на курс"].iloc[0] == "https://m/course/view.php?id=16"
+    options = [s for s in at.selectbox if "Запись реестра" in s.label][0].options
     assert len(options) == 1 and "Курс А" in options[0] and "курс № 16" in options[0]
     assert at.session_state["picked_ok"] is True
     assert any("course=16" in m.value for m in at.markdown)
+    assert any("Показано записей: 1 из 2" in c.value for c in at.caption)
 
 
 def test_registry_can_show_processed_too():
     at = _run(show_all=True)
     assert not at.exception, at.exception
-    assert len(at.selectbox[0].options) == 2
+    assert len(at.dataframe[0].value) == 2
+    entry_select = [s for s in at.selectbox if "Запись реестра" in s.label][0]
+    assert len(entry_select.options) == 2
+
+
+def test_registry_filter_by_file_hides_entries_without_file():
+    at = _run(show_all=True, file_filter="Без файла")
+    assert not at.exception, at.exception
+    assert any("записей нет" in i.value for i in at.info)
 
 
 # --- кнопка «Создать тест в курсе» ---------------------------------------------------------
@@ -91,6 +106,9 @@ def _quiz_script():
     class FakeClient:
         def course_name(self, cid):
             return "Анатомия"
+
+        def course_info(self, cid):
+            return {"name": "Анатомия", "discipline": st.session_state.get("discipline", "Анатомия и физиология ЦНС")}
 
         def plugin_available(self):
             return st.session_state.get("plugin", True)
@@ -136,7 +154,7 @@ def test_create_quiz_button_creates_hidden_quiz_in_found_section():
     assert not at.exception, at.exception
     cid, settings, xml = at.session_state["calls"][0]
     assert cid == 16 and settings.section == 3 and settings.visible is False
-    assert settings.name == "Промежуточная аттестация: Анатомия"
+    assert settings.name == "Тест. Промежуточная аттестация по дисциплине Анатомия и физиология ЦНС"
     assert "<defaultgrade>2</defaultgrade>" in xml
     assert any("Тест создан" in s.value and "4 балл" in s.value for s in at.success)
 
@@ -166,3 +184,84 @@ def test_course_number_from_registry_is_used_by_default():
     at = _run_quiz(reg_course=421)
     assert at.session_state["calls"][0][0] == 421
     assert at.text_input(key="moodle_course_id").value == "421"
+
+
+def test_quiz_name_without_discipline_field_has_no_tail_and_warns():
+    at = _run_quiz(discipline=None)
+    assert at.session_state["calls"][0][1].name == "Тест. Промежуточная аттестация"
+    assert any("Поля из 1С" in c.value for c in at.caption)
+
+
+# --- статус «Отправлен на доработку» при нехватке вопросов -----------------------------------
+
+def _save_script(questions_count, target):
+    import sys
+    sys.path.insert(0, ROOT_PLACEHOLDER)
+    import streamlit as st
+    from src.config import Config
+    from src.course_pipeline import CourseTestResult
+    from src.models import MultipleChoiceQuestion
+    from src.moodle import panel as P
+    from src.moodle import registry as R
+    from src.moodle.publish import UploadLog
+    import os, tempfile
+
+    Config.MOODLE_URL, Config.MOODLE_TOKEN = "https://m.example", "T"
+    saved = st.session_state.setdefault("saved", [])
+
+    class FakeClient:
+        def course_name(self, cid):
+            return "Анатомия"
+
+        def course_info(self, cid):
+            return {"name": "Анатомия", "discipline": "Анатомия", "custom_fields": []}
+
+    class FakeRegistry:
+        def save_result(self, entry_id, **kwargs):
+            saved.append((entry_id, kwargs))
+
+    P.MoodleClient = lambda: FakeClient()
+    P.UploadLog = lambda: UploadLog(os.path.join(tempfile.mkdtemp(), "log.json"))
+    qs = [MultipleChoiceQuestion(question=f"Вопрос {i}?", options=["а", "б"], correct_index=0)
+          for i in range(questions_count)]
+    result = CourseTestResult(questions=qs, target=target)
+    entry = R.RegistryEntry(5, {R.F_COURSE_NAME: "Курс"}, {})
+    P.render_moodle_panel(qs, "f", result, None, course_id=16, entry=entry, registry=FakeRegistry())
+
+
+def _run_save(questions_count, target=25):
+    import inspect, textwrap
+
+    from src.config import Config
+    from src.moodle import panel as P
+
+    saved = (P.MoodleClient, P.UploadLog, Config.MOODLE_URL, Config.MOODLE_TOKEN)
+    src = textwrap.dedent(inspect.getsource(_save_script)).replace("ROOT_PLACEHOLDER", repr(ROOT))
+    try:
+        at = AppTest.from_string(src + f"\n_save_script({questions_count}, {target})\n", default_timeout=30)
+        at.run()
+        at.checkbox(key="moodle_confirm").check().run()
+        at.button(key="moodle_save_registry").click().run()
+        return at
+    finally:
+        P.MoodleClient, P.UploadLog, Config.MOODLE_URL, Config.MOODLE_TOKEN = saved
+
+
+def test_saving_short_test_to_registry_sets_rework_status():
+    from src.moodle.registry import STATUS_REWORK
+
+    at = _run_save(20)
+    assert not at.exception, at.exception
+    _, kwargs = at.session_state["saved"][0]
+    assert kwargs["status"] == STATUS_REWORK
+    assert "Не хватает вопросов: 5." in kwargs["report"]
+    assert "Тест не сформирован" in kwargs["report"]
+    assert any("доработку" in s.value for s in at.success)
+
+
+def test_saving_full_test_to_registry_keeps_status():
+    at = _run_save(25)
+    assert not at.exception, at.exception
+    _, kwargs = at.session_state["saved"][0]
+    assert kwargs["status"] is None
+    assert "Вошло вопросов: 25 из 25." in kwargs["report"]

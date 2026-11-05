@@ -25,10 +25,9 @@ for _stream in (sys.stdout, sys.stderr):
 from src.config import Config
 from src.course_pipeline import prepare_course_test
 from src.exporters.aiken_exporter import count_skipped_for_aiken, questions_to_aiken
-from src.exporters.excel_exporter import questions_to_excel_bytes
+from src.exporters.gift_exporter import questions_to_gift
 from src.exporters.json_exporter import questions_to_json
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
-from src.exporters.qti_exporter import questions_to_qti_xml
 from src.llm.bothub_client import BotHubClient
 from src.moodle.panel import pick_registry_entry, render_moodle_panel
 from src.models import QuestionType
@@ -364,8 +363,8 @@ def _render_question_card(q, index: int) -> str:
 
     if q.type == QuestionType.MULTIPLE_CHOICE:
         options_html = "".join(
-            f"<div class='imes-option{' imes-option-correct' if i == q.correct_index else ''}'>"
-            f"<span class='imes-option-mark'>{'✓' if i == q.correct_index else '○'}</span>"
+            f"<div class='imes-option{' imes-option-correct' if i in q.correct_indices else ''}'>"
+            f"<span class='imes-option-mark'>{'✓' if i in q.correct_indices else '○'}</span>"
             f"<span>{_esc(opt)}</span></div>"
             for i, opt in enumerate(q.options)
         )
@@ -495,7 +494,7 @@ def _render_course_report(result, usage=None) -> None:
     if result.skipped:
         st.warning(
             f"Пропущено вопросов: {len(result.skipped)}. Они не подходят под формат Aiken "
-            "(один вариант из списка, один верный ответ) — их нужно поправить в исходном файле "
+            "(выбор из списка, 1 или 2 верных ответа) — их нужно поправить в исходном файле "
             "или добавить вручную."
         )
         with st.expander("Какие вопросы пропущены и почему", expanded=n == 0 or len(result.skipped) <= 8):
@@ -610,10 +609,10 @@ def _prepare_test(file_name: str, loaded, course_is_aiken: bool) -> None:
 
 
 def _download_buttons(questions_only: list, file_stem: str | None, simple: bool) -> None:
-    """Кнопки скачивания. simple=True: только Aiken и Moodle XML (разделы с отправкой в Moodle)."""
+    """Кнопки скачивания. simple=True: Aiken, Moodle XML и GIFT (разделы с отправкой в Moodle)."""
     aiken_text = questions_to_aiken(questions_only)
     if simple:
-        col_a, col_b, _ = st.columns([1, 1, 2])
+        col_a, col_b, col_c, _ = st.columns([1, 1, 1, 1])
         with col_a:
             st.download_button(
                 label="Скачать в Aiken", data=aiken_text, file_name=f"{file_stem}_aiken.txt",
@@ -626,31 +625,36 @@ def _download_buttons(questions_only: list, file_stem: str | None, simple: bool)
                 file_name=f"{file_stem}_moodle.xml", mime="application/xml",
                 help="Банк вопросов → Импорт → Moodle XML.",
             )
+        with col_c:
+            st.download_button(
+                label="Скачать в GIFT", data=questions_to_gift(questions_only),
+                file_name=f"{file_stem}_gift.txt", mime="text/plain", disabled=not aiken_text,
+                help="Для импорта в Moodle: Банк вопросов → Импорт → GIFT.",
+            )
         return
-    col_dl1, col_dl2, col_dl3, col_dl4, col_dl5 = st.columns(5)
+    col_dl1, col_dl2, col_dl3, col_dl4 = st.columns(4)
     with col_dl1:
         st.download_button("Скачать в JSON", data=questions_to_json(questions_only),
                            file_name="quiz_questions.json", mime="application/json")
     with col_dl2:
-        st.download_button("Скачать в Excel", data=questions_to_excel_bytes(questions_only),
-                           file_name="quiz_questions.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    with col_dl3:
-        st.download_button("Скачать в QTI", data=questions_to_qti_xml(questions_only),
-                           file_name="quiz_questions_qti.xml", mime="application/xml")
-    with col_dl4:
         st.download_button("Скачать для Moodle", data=questions_to_moodle_xml(questions_only),
                            file_name="quiz_questions_moodle.xml", mime="application/xml")
-    with col_dl5:
+    with col_dl3:
         st.download_button(
             "Скачать в Aiken", data=aiken_text, file_name="quiz_questions_aiken.txt",
             mime="text/plain", disabled=not aiken_text,
             help="Простой текстовый формат для импорта в Moodle (Банк вопросов → Импорт → Aiken).",
         )
+    with col_dl4:
+        st.download_button(
+            "Скачать в GIFT", data=questions_to_gift(questions_only), file_name="quiz_questions_gift.txt",
+            mime="text/plain", disabled=not aiken_text,
+            help="Простой текстовый формат для импорта в Moodle (Банк вопросов → Импорт → GIFT).",
+        )
     aiken_skipped = count_skipped_for_aiken(questions_only)
     if aiken_skipped:
         st.markdown(
-            f"<div class='imes-disclaimer'>В файл Aiken не вошло вопросов: <strong>{aiken_skipped}</strong>. "
+            f"<div class='imes-disclaimer'>В файлы Aiken и GIFT не вошло вопросов: <strong>{aiken_skipped}</strong>. "
             "Этот формат хранит только вопросы с выбором ответа и «верно/неверно»; "
             "соответствие, эссе и короткий ответ в нём выразить нельзя — "
             "для них используйте «Скачать для Moodle».</div>",
@@ -962,7 +966,7 @@ else:
                     "словами («Ответ: Б»), знаком (*, +), ключом в конце файла, жирным шрифтом, "
                     "подчёркиванием, маркером или цветом. **ИИ ответы сам не выбирает**: он только "
                     "переносит пометки из файла. Нет пометки — вопрос пропускается, и это видно в отчёте. "
-                    "В тест входят первые 25 подходящих вопросов с одним верным ответом."
+                    "В тест входят первые 25 подходящих вопросов с одним или двумя верными ответами."
                 )
     _reset_course_if_changed(sig)
     analysis = analysis_box.get("v")

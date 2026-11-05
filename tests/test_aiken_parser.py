@@ -90,10 +90,35 @@ def test_answer_points_to_missing_option():
     assert "несуществующий вариант" in result.errors[0]
 
 
-def test_multiple_answers_are_reported():
-    result = parse_aiken("Вопрос?\nA. один\nB. два\nC. три\nANSWER: A, C\n")
+def test_two_correct_answers_are_read():
+    for answer in ("B,D", "B, D", "d,b"):
+        result = parse_aiken(f"Что верно?\nA. один\nB. два\nC. три\nD. четыре\nANSWER: {answer}\n")
+        assert result.errors == []
+        q = result.questions[0]
+        assert q.correct_index == 1 and q.also_correct == [3]
+        assert q.correct_indices == [1, 3] and q.is_multi
+
+
+def test_single_answer_is_not_multi():
+    q = parse_aiken("Что верно?\nA. один\nB. два\nANSWER: B\n").questions[0]
+    assert q.correct_indices == [1] and not q.is_multi
+
+
+def test_three_correct_answers_are_rejected():
+    result = parse_aiken("Вопрос?\nA. один\nB. два\nC. три\nD. четыре\nANSWER: A,B,C\n")
     assert result.questions == []
-    assert "одна буква" in result.errors[0]
+    assert "допускается 1 или 2" in result.errors[0]
+
+
+def test_garbage_after_answer_is_reported():
+    result = parse_aiken("Вопрос?\nA. один\nB. два\nANSWER: ответ Б\n")
+    assert result.questions == []
+    assert "ожидаются буквы" in result.errors[0]
+
+
+def test_multi_answer_roundtrip_through_aiken_export():
+    text = "Что верно?\nA. один\nB. два\nC. три\nD. четыре\nANSWER: B,D"
+    assert questions_to_aiken(parse_aiken(text).questions).strip() == text
 
 
 def test_missing_answer_line_does_not_break_next_question():

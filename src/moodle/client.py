@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import requests
@@ -25,11 +26,33 @@ QUIZ_FUNCTION = "local_qbankremotemanager_upload_quiz"
 CATEGORIES_FUNCTION = "local_qbankremotemanager_get_question_categories"
 # Название раздела курса, куда кладётся новый тест (в шаблоне курсов ЭИОС оно одинаковое)
 QUIZ_SECTION_NAME = "Промежуточная аттестация"
+# Поле курса «Название дисциплины» (раздел настроек курса «Поля из 1С»): на боевой ЭИОС оно
+# называется по-русски, на тестовом сайте по краткому имени. Совпадение ищется без учёта регистра.
+DISCIPLINE_FIELD_NAMES = ("Название дисциплины", "discipline_name")
+DISCIPLINE_FIELD = DISCIPLINE_FIELD_NAMES[0]
+QUIZ_TITLE_PREFIX = "Тест. Промежуточная аттестация"
 REQUEST_TIMEOUT = 60  # секунд
+
+
+def quiz_title(discipline: str | None) -> str:
+    """«Тест. Промежуточная аттестация по дисциплине {название}»; без названия дисциплины — без хвоста."""
+    discipline = " ".join((discipline or "").split())
+    return f"{QUIZ_TITLE_PREFIX} по дисциплине {discipline}"[:250] if discipline else QUIZ_TITLE_PREFIX
 
 
 class MoodleError(Exception):
     """Moodle ответил ошибкой или недоступен. Текст понятен без знания Moodle."""
+
+
+def _custom_field(record: dict, titles) -> str | None:
+    """Значение дополнительного поля курса по названию или краткому имени; None, если поля нет или оно пустое."""
+    wanted = {t.casefold() for t in ([titles] if isinstance(titles, str) else titles)}
+    for item in record.get("customfields") or []:
+        names = {str(item.get("name", "")).strip().casefold(), str(item.get("shortname", "")).strip().casefold()}
+        if wanted & names:
+            value = re.sub(r"<[^>]+>", "", str(item.get("valueraw") or item.get("value") or ""))
+            return " ".join(value.split()) or None
+    return None
 
 
 @dataclass
@@ -132,17 +155,34 @@ class MoodleClient:
         data = self.call("core_webservice_get_site_info")
         return data  # type: ignore[return-value]
 
-    def course_name(self, course_id: int) -> str | None:
-        """
-        Полное название курса или None (курса нет, нет прав или функции нет в службе).
-        Нужно только для показа пользователю, поэтому ошибки не выбрасываем.
-        """
+    def course_record(self, course_id: int) -> dict | None:
+        """Описание курса из Moodle (в том числе дополнительные поля) или None. Ошибки не выбрасываем."""
         try:
             data = self.call("core_course_get_courses_by_field", field="id", value=course_id)
         except MoodleError:
             return None
         courses = data.get("courses", []) if isinstance(data, dict) else []
-        return (courses[0].get("fullname") or None) if courses else None
+        return courses[0] if courses else None
+
+    def course_name(self, course_id: int) -> str | None:
+        """
+        Полное название курса или None (курса нет, нет прав или функции нет в службе).
+        Нужно только для показа пользователю, поэтому ошибки не выбрасываем.
+        """
+        record = self.course_record(course_id)
+        return (record.get("fullname") or None) if record else None
+
+    def course_info(self, course_id: int) -> dict:
+        """Название курса и «Название дисциплины» из полей курса (из 1С): {'name', 'discipline', 'custom_fields'}; нет данных — None."""
+        record = self.course_record(course_id)
+        if not record:
+            return {"name": None, "discipline": None, "custom_fields": []}
+        found = [str(i.get("name") or i.get("shortname") or "?") for i in record.get("customfields") or []]
+        return {
+            "name": record.get("fullname") or None,
+            "discipline": _custom_field(record, DISCIPLINE_FIELD_NAMES),
+            "custom_fields": found,  # что Moodle вернул: помогает понять, почему дисциплина не нашлась
+        }
 
     def upload_draft(self, filename: str, content: bytes) -> int:
         """Загружает файл во временную папку пользователя, возвращает itemid."""
