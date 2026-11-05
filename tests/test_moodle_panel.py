@@ -110,6 +110,12 @@ def _quiz_script():
         def course_info(self, cid):
             return {"name": "Анатомия", "discipline": st.session_state.get("discipline", "Анатомия и физиология ЦНС")}
 
+        def grade_categories(self, cid):
+            return st.session_state.get(
+                "gradecats",
+                ["Не определено", "ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ (максимум можно набрать 50 баллов)",
+                 "ТЕКУЩИЙ КОНТРОЛЬ (максимум можно набрать 50 баллов)"])
+
         def plugin_available(self):
             return st.session_state.get("plugin", True)
 
@@ -117,6 +123,10 @@ def _quiz_script():
             return st.session_state.get("section", 3)
 
         def create_quiz(self, cid, xml, settings, filename="quiz.xml"):
+            if st.session_state.get("taken"):
+                from src.moodle.client import MoodleError
+                raise MoodleError('Moodle вернул ошибку: The ID number "ПА" is already used in this course. '
+                                  '(cmidnumber_taken)')
             calls.append((cid, settings, xml))
             return {"cmid": 42, "questions": 2, "url": "https://m.example/mod/quiz/view.php?id=42"}
 
@@ -124,7 +134,11 @@ def _quiz_script():
     log_path = os.path.join(tempfile.mkdtemp(), "log.json")
     P.UploadLog = lambda: UploadLog(log_path)
     qs = [MultipleChoiceQuestion(question=f"Вопрос {i}?", options=["а", "б"], correct_index=0) for i in range(2)]
-    P.render_moodle_panel(qs, "f", None, None, course_id=st.session_state.get("reg_course", 16))
+    result = None
+    if st.session_state.get("target"):
+        from src.course_pipeline import CourseTestResult
+        result = CourseTestResult(questions=qs, target=st.session_state["target"])
+    P.render_moodle_panel(qs, "f", result, None, course_id=st.session_state.get("reg_course", 16))
 
 
 def _run_quiz(course_override=None, **state):
@@ -216,6 +230,9 @@ def _save_script(questions_count, target):
         def course_info(self, cid):
             return {"name": "Анатомия", "discipline": "Анатомия", "custom_fields": []}
 
+        def grade_categories(self, cid):
+            return []
+
     class FakeRegistry:
         def save_result(self, entry_id, **kwargs):
             saved.append((entry_id, kwargs))
@@ -265,3 +282,70 @@ def test_saving_full_test_to_registry_keeps_status():
     _, kwargs = at.session_state["saved"][0]
     assert kwargs["status"] is None
     assert "Вошло вопросов: 25 из 25." in kwargs["report"]
+
+
+# --- категория журнала оценок ----------------------------------------------------------------
+
+def test_quiz_goes_to_final_attestation_grade_category_by_default():
+    at = _run_quiz()
+    assert not at.exception, at.exception
+    settings = at.session_state["calls"][0][1]
+    assert settings.grade_category == "ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ (максимум можно набрать 50 баллов)"
+    assert settings.to_config(16)["gradecat"] == settings.grade_category
+
+
+def test_quiz_without_attestation_category_warns_and_uses_first_category():
+    at = _run_quiz(gradecats=["Не определено", "ТЕКУЩИЙ КОНТРОЛЬ (максимум можно набрать 50 баллов)"])
+    assert at.session_state["calls"][0][1].grade_category == "Не определено"
+    assert any("нет категории" in c.value for c in at.caption)
+
+
+def test_quiz_grade_category_can_be_typed_when_list_is_unavailable():
+    at = _run_quiz(gradecats=None)
+    assert any("Не удалось получить список категорий" in c.value for c in at.caption)
+    assert at.session_state["calls"][0][1].grade_category is None  # поле пустое: тест создаётся без категории
+
+
+def test_quiz_gets_idnumber_from_defaults_and_formula_is_not_touched():
+    at = _run_quiz()
+    settings = at.session_state["calls"][0][1]
+    assert settings.idnumber == "ПА-тест"
+    config = settings.to_config(16)
+    assert config["cmidnumber"] == "ПА-тест" and "appendtogradecalc" not in config
+
+
+def test_create_quiz_button_is_blocked_when_questions_are_fewer_than_target():
+    import inspect, textwrap
+
+    from src.config import Config
+    from src.moodle import panel as P
+
+    saved = (P.MoodleClient, P.UploadLog, Config.MOODLE_URL, Config.MOODLE_TOKEN)
+    src = textwrap.dedent(inspect.getsource(_quiz_script)).replace("ROOT_PLACEHOLDER", repr(ROOT))
+    try:
+        at = AppTest.from_string(src + "\n_quiz_script()\n", default_timeout=30)
+        at.session_state["target"] = 25  # в тестовом файле только 2 вопроса
+        at.run()
+        at.checkbox(key="moodle_confirm").check().run()
+        assert not at.exception, at.exception
+        assert at.button(key="moodle_create_quiz").disabled
+        assert at.button(key="moodle_upload").disabled  # и загрузка в банк вопросов тоже
+        assert any("не хватает 23" in w.value and "ничего не отправляется" in w.value for w in at.warning)
+        assert not at.session_state["calls"]
+    finally:
+        P.MoodleClient, P.UploadLog, Config.MOODLE_URL, Config.MOODLE_TOKEN = saved
+
+
+def test_create_quiz_button_is_enabled_when_target_is_reached():
+    at = _run_quiz(target=2)  # 2 вопроса из 2
+    assert not at.exception, at.exception
+    assert at.session_state["calls"]
+    assert not at.button(key="moodle_upload").disabled
+
+
+def test_taken_idnumber_error_gets_explanation_and_creates_nothing():
+    at = _run_quiz(taken=True)
+    assert not at.exception, at.exception
+    assert not at.session_state["calls"]
+    assert any("cmidnumber_taken" in e.value for e in at.error)
+    assert any("cron" in i.value and "Значения ID" in i.value for i in at.info)

@@ -11,8 +11,12 @@ from src.exporters.aiken_exporter import questions_to_aiken
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
 from src.exporters.gift_exporter import questions_to_gift
 from src.moodle import registry_table as T
-from src.moodle.client import QUIZ_SECTION_NAME, MoodleClient, MoodleError, QuizSettings, quiz_title
-from src.moodle.publish import UploadLog, can_publish, fingerprint, make_report, make_rework_report
+from src.moodle.client import (
+    GRADE_CATEGORY_PREFIX, QUIZ_SECTION_NAME, MoodleClient, MoodleError, QuizSettings, pick_grade_category, quiz_title,
+)
+from src.moodle.publish import (
+    UploadLog, can_publish, fingerprint, make_report, make_rework_report, quiz_blocked_reason,
+)
 from src.moodle.registry import (
     F_COURSE_NAME, F_GROUP, F_SOURCE, F_TEACHER, STATUS_BANK, STATUS_QUIZ, STATUS_REWORK,
     MoodleRegistry, RegistryEntry,
@@ -163,13 +167,30 @@ def _course_info(client: MoodleClient, course_id: int) -> dict:
     return cache[course_id]
 
 
+def _grade_categories(client: MoodleClient, course_id: int) -> list[str] | None:
+    """Категории журнала оценок курса (с запоминанием на сессию); None — узнать не удалось."""
+    cache = st.session_state.setdefault("_grade_categories", {})
+    if course_id not in cache:
+        try:
+            names = client.grade_categories(course_id)
+        except MoodleError as exc:
+            st.warning(str(exc))
+            return None
+        if names is None:
+            return None  # неудачу не запоминаем: после исправления (плагин, права) список подтянется сам
+        cache[course_id] = names
+    return cache[course_id]
+
+
 def _course_title(client: MoodleClient, course_id: int, fallback: str = "") -> str:
     """Название курса из Moodle (с запоминанием на сессию); если не получилось, запасной вариант."""
     return _course_info(client, course_id)["name"] or fallback
 
 
 def _quiz_settings_form(discipline: str | None, course_id: int | None = None,
-                        custom_fields: list[str] | None = None) -> QuizSettings:
+                        custom_fields: list[str] | None = None,
+                        grade_categories: list[str] | None = None,
+                        grade_categories_error: str | None = None) -> QuizSettings:
     """
     Свёрнутый блок настроек теста: значения по умолчанию можно поменять перед созданием.
 
@@ -193,6 +214,7 @@ def _quiz_settings_form(discipline: str | None, course_id: int | None = None,
                 st.caption("В полях курса «Поля из 1С» не нашлось названия дисциплины: Moodle не вернул дополнительных "
                            "полей курса (проверьте, что поле заполнено и видно пользователю токена). "
                            "Впишите название в название теста вручную.")
+        grade_category = _grade_category_picker(course_id, grade_categories, grade_categories_error)
         c1, c2, c3 = st.columns(3)
         with c1:
             minutes = st.number_input("Время, минут (0 — без ограничения)", min_value=0, max_value=600,
@@ -203,6 +225,11 @@ def _quiz_settings_form(discipline: str | None, course_id: int | None = None,
         with c3:
             points = st.number_input("Баллов за вопрос", min_value=0.5, max_value=100.0,
                                      value=float(default.points_per_question), step=0.5, key="quiz_points")
+        idnumber = st.text_input("Идентификационный номер теста", value=default.idnumber or "",
+                                 key="quiz_idnumber",
+                                 help="Номер элемента оценивания в журнале; на него ссылаются формулы категорий "
+                                      "([[ПА-тест]]). Должен быть уникальным в курсе. Пусто: номер не задаётся. "
+                                      "Формулу категории приложение не меняет: её правят вручную.")
         shuffle_q = st.checkbox("Перемешивать вопросы", value=default.shuffle_questions, key="quiz_shuffle_q")
         shuffle_a = st.checkbox("Перемешивать варианты ответов", value=default.shuffle_answers, key="quiz_shuffle_a")
         visible = st.checkbox("Сразу показать тест студентам", value=default.visible, key="quiz_visible",
@@ -212,7 +239,28 @@ def _quiz_settings_form(discipline: str | None, course_id: int | None = None,
         name=name.strip() or quiz_title(discipline),
         visible=visible, attempts=int(attempts), time_limit_minutes=int(minutes),
         points_per_question=float(points), shuffle_questions=shuffle_q, shuffle_answers=shuffle_a,
+        grade_category=grade_category, idnumber=idnumber.strip() or None,
     )
+
+
+def _grade_category_picker(course_id: int | None, categories: list[str] | None, reason: str | None = None) -> str | None:
+    """Выбор категории журнала оценок: по умолчанию «ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ …», если она есть в курсе."""
+    help_text = ("Категория журнала оценок курса, в которую попадёт тест. Название должно совпадать с журналом "
+                 "(регистр важен). Если категория не выбрана, Moodle положит тест вне категорий.")
+    if categories is None:
+        st.caption("Не удалось получить список категорий журнала оценок: без названия категории Moodle положит тест "
+                   "в корень журнала. Название можно вписать вручную.")
+        if reason:
+            st.caption(f"Ответ Moodle: {reason[:400]}")
+        return st.text_input("Категория журнала оценок", value="", key=f"quiz_gradecat_text_{course_id}",
+                             help=help_text).strip() or None
+    picked = pick_grade_category(categories)
+    if picked is None:
+        st.caption(f"В журнале оценок курса нет категории «{GRADE_CATEGORY_PREFIX}…»: по умолчанию тест "
+                   "попадёт в корень журнала. Выберите другую категорию, если нужно.")
+    return st.selectbox("Категория журнала оценок", categories,
+                        index=categories.index(picked) if picked in categories else 0,
+                        key=f"quiz_gradecat_{course_id}", help=help_text)
 
 
 def _create_quiz(client: MoodleClient, course_id: int, category: str, questions, settings: QuizSettings,
@@ -233,6 +281,12 @@ def _create_quiz(client: MoodleClient, course_id: int, category: str, questions,
         created = client.create_quiz(course_id, xml_text, settings, filename=f"{file_stem}_moodle.xml")
     except MoodleError as exc:
         st.error(f"Не удалось создать тест: {exc}")
+        if "cmidnumber_taken" in str(exc):
+            st.info("Идентификационный номер уже занят в курсе. Так бывает, если в курсе уже есть элемент журнала "
+                    "с таким номером или тест с ним только что удалили: Moodle завершает удаление при следующем "
+                    "запуске cron. Посмотрите «Значения ID» в «Редактировать формулу» категории журнала, освободите "
+                    "номер и повторите. Номер можно сменить в «Настройках теста в курсе», но тогда формула "
+                    "категории должна ссылаться на него.")
         return
 
     log.add(fp, course_id, category, len(questions), kind="quiz")
@@ -240,6 +294,8 @@ def _create_quiz(client: MoodleClient, course_id: int, category: str, questions,
     st.success(f"Тест создан в курсе № {course_id}: вопросов {created['questions']}, "
                f"максимум {created['questions'] * settings.points_per_question:g} баллов, тест {state}.")
     st.markdown(f"[Открыть тест в Moodle]({created['url']})")
+    for warning in created.get("warnings", []):
+        st.warning(warning)
     if entry is not None and registry is not None:
         try:
             registry.set_status(entry.entry_id, STATUS_QUIZ,
@@ -344,6 +400,9 @@ def render_moodle_panel(
     )
 
     report = make_report(result, usage, len(questions))
+    blocked = quiz_blocked_reason(result)  # вопросов меньше нормы: ни в банк, ни в тест не отправляем
+    if blocked:
+        st.warning(blocked.replace("Тест в курсе не создаётся", "В курс ничего не отправляется"))
     c_reg, c_course = st.columns(2)
     with c_reg:
         if entry is not None and registry is not None:
@@ -369,7 +428,7 @@ def render_moodle_panel(
                 except MoodleError as exc:
                     st.error(f"Не удалось добавить файл в базу данных: {exc}")
     with c_course:
-        if st.button("Загрузить вопросы в банк вопросов курса", type="primary", disabled=not confirmed,
+        if st.button("Загрузить вопросы в банк вопросов курса", type="primary", disabled=not confirmed or bool(blocked),
                      key="moodle_upload", help="Вопросы попадут в банк вопросов курса, в указанную папку."):
             try:
                 message = client.import_xml(course_id, xml_text, filename=f"{file_stem}_moodle.xml")
@@ -386,8 +445,10 @@ def render_moodle_panel(
     st.markdown("<div class='imes-panel-sub'>Или создайте готовый тест: вопросы попадут и в банк, и в новый тест "
                 f"в разделе «{html.escape(QUIZ_SECTION_NAME)}».</div>", unsafe_allow_html=True)
     info = _course_info(client, course_id)
-    settings = _quiz_settings_form(info["discipline"], course_id, info.get("custom_fields"))
-    if st.button("Создать тест в курсе", disabled=not confirmed, key="moodle_create_quiz",
+    settings = _quiz_settings_form(info["discipline"], course_id, info.get("custom_fields"),
+                                   _grade_categories(client, course_id),
+                                   getattr(client, "grade_categories_error", None))
+    if st.button("Создать тест в курсе", disabled=not confirmed or bool(blocked), key="moodle_create_quiz",
                  help="Тест создаётся скрытым. Не нажимайте вместе с загрузкой в банк: вопросы задвоятся."):
         _create_quiz(client, course_id, category, questions, settings, log, fp, entry, registry,
                      result, usage, file_stem)

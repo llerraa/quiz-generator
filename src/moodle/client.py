@@ -81,6 +81,13 @@ class QuizSettings:
     # значение по умолчанию не проходит собственную проверку, поэтому передаём явно.
     # При одной попытке разницы нет. Если язык сайта не русский, укажите название на нём.
     grade_method: str = "Высшая оценка"
+    # Категория журнала оценок: плагин принимает её НАЗВАНИЕ (с учётом регистра, как в журнале).
+    # None — не передавать: Moodle положит тест в корень журнала, вне категорий.
+    grade_category: str | None = None
+    # Идентификационный номер теста в журнале оценок: на него ссылаются формулы категорий ([[ПА]]).
+    # Формулу категории приложение НЕ меняет: её правят менеджеры вручную.
+    # Нужна версия плагина imes2; на старой тест создаётся без номера (см. create_quiz). Пусто — не задавать.
+    idnumber: str | None = "ПА-тест"
     extra: dict = field(default_factory=dict)  # любые другие поля config плагина
 
     def to_config(self, course_id: int) -> dict:
@@ -97,6 +104,10 @@ class QuizSettings:
             "preferredbehaviour": self.behaviour,
             "grademethod": self.grade_method,
         }
+        if self.grade_category:
+            config["gradecat"] = self.grade_category
+        if self.idnumber:
+            config["cmidnumber"] = self.idnumber
         if self.show_marks:
             # Флаги «Параметры просмотра»: оценка видна сразу после попытки, пока тест открыт и после закрытия.
             for when in ("immediately", "open", "closed"):
@@ -105,10 +116,46 @@ class QuizSettings:
         return config
 
 
+# Категория журнала оценок, куда кладём тест (раздел курса «Промежуточная аттестация»)
+GRADE_CATEGORY_PREFIX = "ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ"
+# Заведомо несуществующее название: плагин проверяет его до создания чего-либо и в ошибке перечисляет все категории
+_GRADE_PROBE = "__список_категорий__"
+_EXPECTED_RE = re.compile(r"Expected one of:\s*\[(.*)\]\s*but was", re.S)
+
+
+# Поля config, которые понимает только плагин версии imes2
+_NEW_PLUGIN_KEYS = {"cmidnumber"}
+
+
+def _is_unknown_keys_error(message: str) -> bool:
+    """Moodle отклонил поля, которых нет в описании функции (плагин старой версии)."""
+    lowered = message.lower()
+    return "unexpected keys" in lowered or "invalidparameter" in lowered or "invalid parameter" in lowered
+
+
+def parse_expected_values(message: str) -> list[str] | None:
+    """Список допустимых значений из ошибки плагина «Expected one of: [ a, b, c,] but was …»; None — не нашли."""
+    match = _EXPECTED_RE.search(message)
+    if not match:
+        return None
+    values = [part.strip() for part in match.group(1).split(",")]
+    return [v for v in values if v] or None
+
+
+def pick_grade_category(names: list[str] | None, prefix: str = GRADE_CATEGORY_PREFIX) -> str | None:
+    """Категория, название которой начинается с prefix (без учёта регистра и лишних пробелов); иначе None."""
+    wanted = " ".join(prefix.split()).casefold()
+    for name in names or []:
+        if " ".join(name.split()).casefold().startswith(wanted):
+            return name
+    return None
+
+
 class MoodleClient:
     def __init__(self, base_url: str | None = None, token: str | None = None):
         self.base_url = (base_url or Config.MOODLE_URL or "").rstrip("/")
         self.token = token or Config.MOODLE_TOKEN
+        self.grade_categories_error: str | None = None  # почему не удалось получить категории журнала
         if not self.base_url or not self.token:
             raise MoodleError(
                 "Не заданы MOODLE_URL и MOODLE_TOKEN. Добавьте их в .env "
@@ -241,6 +288,36 @@ class MoodleClient:
                 return int(section["section"])
         return None
 
+    def grade_categories(self, course_id: int, section: int = 0) -> list[str] | None:
+        """
+        Названия категорий журнала оценок курса или None, если узнать не удалось.
+
+        У плагина нет отдельной функции для списка категорий, зато он проверяет `gradecat` ДО импорта
+        вопросов и создания теста и перечисляет допустимые значения в тексте ошибки. Поэтому спрашиваем его
+        заведомо неверным названием: ничего не создаётся. Список разбирается по запятым, поэтому название
+        категории с запятой внутри здесь разделится на части (в журнале ИМЭС таких нет).
+        """
+        # Без идентификационного номера: поля imes2 старый плагин отклонил бы раньше, чем дошёл бы до категорий
+        config = QuizSettings(name="probe", section=section, grade_category=_GRADE_PROBE,
+                              idnumber=None).to_config(course_id)
+        params = {f"config[{key}]": value for key, value in config.items()}
+        params["itemid"] = 0
+        self.grade_categories_error = None
+        try:
+            result = self.call(QUIZ_FUNCTION, **params)
+        except MoodleError as exc:
+            names = parse_expected_values(str(exc))
+            if names is None:
+                self.grade_categories_error = str(exc)  # покажем в интерфейсе, чтобы было видно причину
+            return names
+        # Плагин не отклонил выдуманное название (другая версия): список получить нельзя.
+        # Если вдруг тест всё же создан, выбрасываем исключение, чтобы это не прошло молча.
+        if isinstance(result, dict) and result.get("status") == "OK":
+            raise MoodleError("Проверка категорий журнала неожиданно создала тест "
+                              f"(модуль {result.get('quizid')}). Удалите его в курсе.")
+        self.grade_categories_error = f"Плагин не отклонил выдуманное название категории: {result}"
+        return None
+
     def create_quiz(self, course_id: int, xml_text: str, settings: QuizSettings,
                     filename: str = "quiz.xml") -> dict:
         """
@@ -250,17 +327,36 @@ class MoodleClient:
         Внимание: защиты от дублей нет — повторный вызов создаст ещё один тест.
         """
         itemid = self.upload_draft(filename, xml_text.encode("utf-8"))
-        params: dict = {f"config[{key}]": value for key, value in settings.to_config(course_id).items()}
-        params["itemid"] = itemid
-        params["shuffle"] = int(settings.shuffle_questions)
-        result = self.call(QUIZ_FUNCTION, **params)
+        warnings: list[str] = []
+        config = settings.to_config(course_id)
+        try:
+            result = self._upload_quiz(config, itemid, settings)
+        except MoodleError as exc:
+            if not _NEW_PLUGIN_KEYS & config.keys() or not _is_unknown_keys_error(str(exc)):
+                raise
+            # Плагин старой версии (imes1) не знает идентификационный номер: создаём тест без него
+            for key in _NEW_PLUGIN_KEYS:
+                config.pop(key, None)
+            warnings.append(f"Плагин на сайте ещё не поддерживает идентификационный номер теста: тест создан без "
+                            f"«{settings.idnumber}». Поставьте номер вручную в настройках теста или обновите плагин "
+                            "до версии imes2.")
+            result = self._upload_quiz(config, itemid, settings)
         if not isinstance(result, dict):
             raise MoodleError(f"Плагин ответил в неожиданном формате: {result}")
         if result.get("status") != "OK":
             raise MoodleError(f"Тест не создан: {result.get('error_message') or result}")
         cmid = int(result["quizid"])  # плагин называет quizid номер модуля курса (cmid)
+        if result.get("error_message"):  # статус OK, но плагин передал замечание
+            warnings.append(str(result["error_message"]))
         return {
             "cmid": cmid,
             "questions": int(result.get("num_of_questions", 0)),
             "url": f"{self.base_url}/mod/quiz/view.php?id={cmid}",
+            "warnings": warnings,
         }
+
+    def _upload_quiz(self, config: dict, itemid: int, settings: QuizSettings) -> object:
+        params: dict = {f"config[{key}]": value for key, value in config.items()}
+        params["itemid"] = itemid
+        params["shuffle"] = int(settings.shuffle_questions)
+        return self.call(QUIZ_FUNCTION, **params)

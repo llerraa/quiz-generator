@@ -104,7 +104,8 @@ def test_create_quiz_uploads_then_sends_flat_config():
     responses = [_resp([{"itemid": 77}]), _resp({"quizid": 42, "status": "OK", "num_of_questions": 25})]
     with patch("src.moodle.client.requests.post", side_effect=responses) as post:
         result = _client().create_quiz(16, "<quiz/>", QuizSettings(name="Экзамен", shuffle_questions=True))
-    assert result == {"cmid": 42, "questions": 25, "url": "https://moodle.test/mod/quiz/view.php?id=42"}
+    assert result == {"cmid": 42, "questions": 25, "url": "https://moodle.test/mod/quiz/view.php?id=42",
+                      "warnings": []}
     data = post.call_args_list[1].kwargs["data"]
     assert data["wsfunction"] == "local_qbankremotemanager_upload_quiz"
     assert data["itemid"] == 77
@@ -112,6 +113,8 @@ def test_create_quiz_uploads_then_sends_flat_config():
     assert data["config[quizname]"] == "Экзамен"
     assert data["config[courseid]"] == 16
     assert data["config[visible]"] == 0
+    # идентификационный номер теста (плагин imes2); формулу категории приложение не трогает
+    assert data["config[cmidnumber]"] == "ПА-тест" and "config[appendtogradecalc]" not in data
 
 
 def test_create_quiz_plugin_error_becomes_readable():
@@ -224,3 +227,129 @@ def test_quiz_title():
     from src.moodle.client import quiz_title
     assert quiz_title("Анатомия") == "Тест. Промежуточная аттестация по дисциплине Анатомия"
     assert quiz_title("  ") == quiz_title(None) == "Тест. Промежуточная аттестация"
+
+
+# --- категория журнала оценок -------------------------------------------------------------
+
+EXPECTED_ERROR = ("Moodle вернул ошибку: Wrong value for gradecat entered. Expected one of: [ Не определено, "
+                  "ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ (максимум можно набрать 50 баллов), "
+                  "ТЕКУЩИЙ КОНТРОЛЬ (максимум можно набрать 50 баллов),] but was __список_категорий__. "
+                  "(badargument_with_expected_values)")
+
+
+def test_quiz_settings_pass_grade_category_name_to_plugin():
+    assert "gradecat" not in QuizSettings(name="Т").to_config(16)
+    assert QuizSettings(name="Т", grade_category="Кат").to_config(16)["gradecat"] == "Кат"
+
+
+def test_parse_expected_values_reads_plugin_error():
+    from src.moodle.client import parse_expected_values
+    assert parse_expected_values(EXPECTED_ERROR) == [
+        "Не определено",
+        "ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ (максимум можно набрать 50 баллов)",
+        "ТЕКУЩИЙ КОНТРОЛЬ (максимум можно набрать 50 баллов)",
+    ]
+    assert parse_expected_values("что-то другое") is None
+
+
+def test_pick_grade_category_matches_prefix_ignoring_case_and_spaces():
+    from src.moodle.client import pick_grade_category
+    names = ["Не определено", "Промежуточная  аттестация (50)", "Текущий контроль"]
+    assert pick_grade_category(names) == "Промежуточная  аттестация (50)"
+    assert pick_grade_category(["Не определено"]) is None
+    assert pick_grade_category(None) is None
+
+
+def test_grade_categories_asks_plugin_with_invalid_name_and_parses_error():
+    seen = {}
+
+    class C(MoodleClient):
+        def call(self, function, **params):
+            seen.update(params, function=function)
+            raise MoodleError(EXPECTED_ERROR)
+
+    names = C(base_url="https://m.example", token="T").grade_categories(16)
+    assert names[1].startswith("ПРОМЕЖУТОЧНАЯ АТТЕСТАЦИЯ")
+    assert seen["function"] == "local_qbankremotemanager_upload_quiz"
+    assert seen["config[gradecat]"] == "__список_категорий__" and seen["itemid"] == 0
+
+
+def test_grade_categories_unknown_when_plugin_gives_other_error():
+    class C(MoodleClient):
+        def call(self, function, **params):
+            raise MoodleError("Moodle вернул ошибку: нет прав")
+
+    assert C(base_url="https://m.example", token="T").grade_categories(16) is None
+
+
+def test_grade_categories_refuses_silently_created_quiz():
+    class C(MoodleClient):
+        def call(self, function, **params):
+            return {"status": "OK", "quizid": 77}
+
+    import pytest
+    with pytest.raises(MoodleError, match="77"):
+        C(base_url="https://m.example", token="T").grade_categories(16)
+
+
+# --- идентификационный номер теста (плагин imes2) --------------------------------------------
+
+def test_quiz_settings_idnumber():
+    config = QuizSettings(name="Т").to_config(16)
+    assert config["cmidnumber"] == "ПА-тест" and "appendtogradecalc" not in config
+    config = QuizSettings(name="Т", idnumber=None).to_config(16)
+    assert "cmidnumber" not in config
+    assert QuizSettings(name="Т", idnumber="ПА-другой").to_config(16)["cmidnumber"] == "ПА-другой"
+
+
+def test_create_quiz_on_old_plugin_retries_without_idnumber_and_warns():
+    unexpected = {"exception": "invalid_parameter_exception", "errorcode": "invalidparameter",
+                  "message": "Invalid parameter value detected",
+                  "debuginfo": "config => Unexpected keys (cmidnumber) detected in parameter array."}
+    responses = [_resp([{"itemid": 5}]), _resp(unexpected), _resp({"quizid": 9, "status": "OK", "num_of_questions": 2})]
+    with patch("src.moodle.client.requests.post", side_effect=responses) as post:
+        result = _client().create_quiz(16, "<quiz/>", QuizSettings(name="Т"))
+    assert result["cmid"] == 9
+    assert any("не поддерживает идентификационный номер" in w for w in result["warnings"])
+    first, retry = post.call_args_list[1].kwargs["data"], post.call_args_list[2].kwargs["data"]
+    assert "config[cmidnumber]" in first and "config[cmidnumber]" not in retry
+    assert retry["itemid"] == 5
+
+
+def test_create_quiz_does_not_retry_on_other_errors():
+    err = {"exception": "moodle_exception", "errorcode": "cmidnumber_taken",
+           "message": 'The ID number "ПА" is already used in this course.'}
+    with patch("src.moodle.client.requests.post", side_effect=[_resp([{"itemid": 5}]), _resp(err)]) as post:
+        with pytest.raises(MoodleError, match="already used"):
+            _client().create_quiz(16, "<quiz/>", QuizSettings(name="Т"))
+    assert post.call_count == 2
+
+
+def test_create_quiz_shows_plugin_remark_as_warning():
+    ok = {"quizid": 9, "status": "OK", "num_of_questions": 2, "error_message": "Какое-то замечание плагина"}
+    with patch("src.moodle.client.requests.post", side_effect=[_resp([{"itemid": 5}]), _resp(ok)]):
+        result = _client().create_quiz(16, "<quiz/>", QuizSettings(name="Т"))
+    assert result["warnings"] == ["Какое-то замечание плагина"]
+
+
+def test_grade_categories_probe_does_not_send_imes2_fields():
+    # старый плагин отклонил бы cmidnumber раньше, чем проверил категорию, и список не получился бы
+    seen = {}
+
+    class C(MoodleClient):
+        def call(self, function, **params):
+            seen.update(params)
+            raise MoodleError(EXPECTED_ERROR)
+
+    assert C(base_url="https://m.example", token="T").grade_categories(16)
+    assert "config[cmidnumber]" not in seen
+
+
+def test_grade_categories_remembers_reason_when_list_is_unavailable():
+    class C(MoodleClient):
+        def call(self, function, **params):
+            raise MoodleError("Moodle вернул ошибку: Invalid parameter value detected (invalidparameter)")
+
+    client = C(base_url="https://m.example", token="T")
+    assert client.grade_categories(16) is None
+    assert "invalidparameter" in client.grade_categories_error

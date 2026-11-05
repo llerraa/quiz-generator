@@ -91,6 +91,15 @@ def make_rework_report(result=None, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
+def quiz_blocked_reason(result=None) -> str:
+    """Почему тест в курсе создавать нельзя (пусто — можно): вопросов меньше нормы, файл идёт на доработку."""
+    shortfall = getattr(result, "shortfall", 0) if result is not None else 0
+    if shortfall > 0:
+        return (f"Вопросов {len(result.questions)} из {result.target}: не хватает {shortfall}. "
+                "Тест в курсе не создаётся, отправьте файл преподавателю на доработку.")
+    return ""
+
+
 def can_publish(result=None) -> tuple[bool, str]:
     """Можно ли отправлять результат в курс. Неполный из-за лимита или пустой — нельзя."""
     if result is None:
