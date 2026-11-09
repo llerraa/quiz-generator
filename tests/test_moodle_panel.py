@@ -17,14 +17,18 @@ def _registry_script():
     os.environ["MOODLE_REGISTRY_COURSE"] = "17"
     AIKEN = "Что такое переменная?\nA. Имя для значения\nB. Цикл\nANSWER: A\n".encode()
 
-    def mk(i, name, cid, status):
+    def mk(i, name, cid, status, exception=""):
         return R.RegistryEntry(
             i,
-            {R.F_COURSE_NAME: name, R.F_COURSE_LINK: f"https://m/course/view.php?id={cid}", R.F_STATUS: status},
+            {R.F_COURSE_NAME: name, R.F_COURSE_LINK: f"https://m/course/view.php?id={cid}", R.F_STATUS: status,
+             R.F_EXCEPTION: exception},
             {R.F_SOURCE: [R.RegistryFile("a.txt", "https://m/f")]},
         )
 
-    R.MoodleRegistry.entries = lambda self: [mk(1, "Курс А", 16, "Не обработан"), mk(2, "Курс Б", 18, "Обработан")]
+    R.MoodleRegistry.entries = lambda self: [
+        mk(1, "Курс А", 16, "Не обработан"), mk(2, "Курс Б", 18, "Обработан"),
+        mk(3, "Курс В", 19, "Не обработан", "Тест не нужен"),
+    ]
     R.MoodleRegistry.download = lambda self, f: AIKEN
     P.MoodleClient = lambda: MoodleClient("https://m.example", "T")
 
@@ -34,7 +38,7 @@ def _registry_script():
         st.write(f"course={picked[1].course_id} name={picked[2]} size={len(picked[3])}")
 
 
-def _run(show_all: bool = False, file_filter: str | None = None) -> AppTest:
+def _run(show_all: bool = False, file_filter: str | None = None, exceptions: list[str] | None = None) -> AppTest:
     """Скрипт подменяет классы Moodle глобально, поэтому после запуска всё возвращаем как было."""
     import inspect, os, textwrap
 
@@ -52,6 +56,8 @@ def _run(show_all: bool = False, file_filter: str | None = None) -> AppTest:
             at.multiselect(key="registry_statuses").set_value(["Не обработан", "(без статуса)", "Обработан"]).run()
         if file_filter:
             at.selectbox(key="registry_file_filter").select(file_filter).run()
+        if exceptions is not None:
+            at.multiselect(key="registry_exceptions").set_value(exceptions).run()
         return at
     finally:
         (R.MoodleRegistry.entries, R.MoodleRegistry.download, P.MoodleClient,
@@ -72,7 +78,7 @@ def test_registry_lists_only_unprocessed_by_default():
     assert len(options) == 1 and "Курс А" in options[0] and "курс № 16" in options[0]
     assert at.session_state["picked_ok"] is True
     assert any("course=16" in m.value for m in at.markdown)
-    assert any("Показано записей: 1 из 2" in c.value for c in at.caption)
+    assert any("Показано записей: 1 из 3" in c.value for c in at.caption)
 
 
 def test_registry_can_show_processed_too():
@@ -87,6 +93,24 @@ def test_registry_filter_by_file_hides_entries_without_file():
     at = _run(show_all=True, file_filter="Без файла")
     assert not at.exception, at.exception
     assert any("записей нет" in i.value for i in at.info)
+
+
+def test_records_with_exception_are_hidden_by_default_and_not_processed():
+    at = _run()
+    assert "Курс В" not in list(at.dataframe[0].value["Курс"])
+    # если показать исключения, запись видна в таблице, но приложение её не обрабатывает
+    at = _run(exceptions=["Тест не нужен"])
+    assert not at.exception, at.exception
+    assert list(at.dataframe[0].value["Курс"]) == ["Курс В"]
+    assert list(at.dataframe[0].value["Исключения"]) == ["Тест не нужен"]
+    assert any("Тест не нужен" in w.value and "вручную" in w.value for w in at.warning)
+    assert at.session_state["picked_ok"] is False
+
+
+def test_registry_has_kind_department_and_exception_filters():
+    at = _run()
+    labels = [m.label for m in at.multiselect]
+    assert {"Статус", "Вид контроля", "Кафедра", "Исключения"} <= set(labels)
 
 
 # --- кнопка «Создать тест в курсе» ---------------------------------------------------------

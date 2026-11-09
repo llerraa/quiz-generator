@@ -294,6 +294,24 @@ _CSS = """
     color: #1A1A1A !important; -webkit-text-fill-color: #1A1A1A !important;
 }
 [class*="st-key-step_"] [data-baseweb="select"] svg, [class*="st-key-step_"] [data-testid="stSelectbox"] svg { fill: #1A1A1A !important; }
+/* Поля с несколькими значениями (фильтры реестра): светлый фон, тёмный текст, оранжевые метки */
+[class*="st-key-step_"] [data-testid="stMultiSelect"] > div > div {
+    background: #F2F2F4 !important; border: 1px solid rgba(0,0,0,0.14) !important; border-radius: 8px !important;
+}
+[class*="st-key-step_"] [data-testid="stMultiSelect"] input {
+    color: #1A1A1A !important; -webkit-text-fill-color: #1A1A1A !important; caret-color: #1A1A1A !important;
+}
+[class*="st-key-step_"] [data-testid="stMultiSelect"] input::placeholder {
+    color: #6B6B72 !important; -webkit-text-fill-color: #6B6B72 !important; opacity: 1 !important;
+}
+[class*="st-key-step_"] [data-testid="stMultiSelect"] svg { fill: #1A1A1A !important; color: #1A1A1A !important; }
+[class*="st-key-step_"] [data-testid="stMultiSelectTagsContainer"] > span > span {
+    background: var(--imes-orange) !important; border-radius: 6px !important;
+}
+[class*="st-key-step_"] [data-testid="stMultiSelectTagsContainer"] > span > span,
+[class*="st-key-step_"] [data-testid="stMultiSelectTagsContainer"] > span > span * {
+    color: #FFFFFF !important; fill: #FFFFFF !important;
+}
 [class*="st-key-step_"] [data-testid="stNumberInput"] button { background: #E6E6EA !important; }
 [class*="st-key-step_"] [data-testid="stNumberInput"] button * { color: #1A1A1A !important; fill: #1A1A1A !important; }
 [class*="st-key-step_"] [data-baseweb="checkbox"] > span:first-child { border-color: #8A8A90 !important; }

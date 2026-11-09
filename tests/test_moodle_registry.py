@@ -191,3 +191,11 @@ def test_save_result_skips_missing_xml_column_and_writes_checked_and_gift_files(
     file_fields = [v for k, v in params.items() if k.endswith("[subfield]") and v == "file"]
     assert len(file_fields) == 2  # Aiken и GIFT; XML в базе нет, поэтому не пишется
     assert params["data[1][fieldid]"] == 18 and params["data[2][fieldid]"] == 19
+
+
+def test_exception_column_is_read_and_empty_by_default():
+    reg = MoodleRegistry(FakeClient(), 17)
+    entry = reg.find_by_course(16)[0]
+    assert entry.exception == ""  # в тестовой базе колонки «Исключения» нет
+    entry.values["Исключения"] = "Тест не нужен"
+    assert entry.exception == "Тест не нужен"

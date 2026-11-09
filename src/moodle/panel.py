@@ -18,7 +18,7 @@ from src.moodle.publish import (
     UploadLog, can_publish, fingerprint, make_report, make_rework_report, quiz_blocked_reason,
 )
 from src.moodle.registry import (
-    F_COURSE_NAME, F_GROUP, F_SOURCE, F_TEACHER, STATUS_BANK, STATUS_QUIZ, STATUS_REWORK,
+    F_COURSE_NAME, F_DEPARTMENT, F_GROUP, F_KIND, F_SOURCE, F_TEACHER, STATUS_BANK, STATUS_QUIZ, STATUS_REWORK,
     MoodleRegistry, RegistryEntry,
 )
 
@@ -46,6 +46,8 @@ def _entry_label(entry: RegistryEntry) -> str:
             parts.append(v[key])
     if entry.status:
         parts.append(f"[{entry.status}]")
+    if entry.exception:
+        parts.append(f"(исключение: {entry.exception})")
     return " · ".join(parts)
 
 
@@ -90,17 +92,35 @@ def pick_registry_entry(on_file=None):
     c_status, c_file, c_sort = st.columns([3, 2, 2])
     with c_status:
         statuses = st.multiselect("Статус", options=T.status_options(entries), default=T.DEFAULT_STATUSES,
+                                  placeholder="Выберите статусы",
                                   key="registry_statuses")
     with c_file:
         file_filter = st.selectbox("Файл от зав кафедрой", T.FILE_CHOICES, key="registry_file_filter")
     with c_sort:
         sort_mode = st.selectbox("Порядок", T.SORT_CHOICES, key="registry_sort")
+    c_kind, c_dep, c_exc = st.columns([2, 3, 2])
+    with c_kind:
+        kinds = st.multiselect("Вид контроля", options=T.value_options(entries, F_KIND), key="registry_kinds",
+                               placeholder="Все")
+    with c_dep:
+        departments = st.multiselect("Кафедра", options=T.value_options(entries, F_DEPARTMENT),
+                                     key="registry_departments", placeholder="Все")
+    with c_exc:
+        exceptions = st.multiselect("Исключения", options=T.exception_options(entries), default=T.DEFAULT_EXCEPTIONS,
+                                    key="registry_exceptions", placeholder="Все",
+                                    help="Записи с исключением (тест не нужен, несколько тестов) обрабатываются "
+                                         "вручную, не в приложении. По умолчанию они скрыты.")
     query = st.text_input("Поиск по названию курса, группе, преподавателю, кафедре или номеру курса", key="registry_query")
 
-    shown = T.sort_entries(T.filter_entries(entries, statuses, file_filter, query), sort_mode)
+    shown = T.sort_entries(
+        T.filter_entries(entries, statuses, file_filter, query,
+                         exceptions=exceptions, kinds=kinds, departments=departments),
+        sort_mode,
+    )
     st.caption(f"Показано записей: {len(shown)} из {len(entries)}.")
     if not shown:
-        st.info("Под выбранные фильтры записей нет. Добавьте статусы в фильтр «Статус», чтобы увидеть остальные.")
+        st.info("Под выбранные фильтры записей нет. Добавьте статусы в фильтр «Статус» или значения в «Исключения», "
+                "чтобы увидеть остальные.")
         return None
 
     # Таблица: клик по строке выбирает запись (ссылка на курс открывается отдельным кликом по ячейке)
@@ -130,6 +150,11 @@ def pick_registry_entry(on_file=None):
             format_func=lambda i: _entry_label(by_id[i]),
         )
     entry = by_id[chosen]
+
+    if entry.exception:
+        st.warning(f"В этой записи указано исключение: «{entry.exception}». Такие записи обрабатываются вручную, "
+                   "в приложении тест для них не готовится.")
+        return None
 
     files = entry.files.get(F_SOURCE, [])
     with col_file:

@@ -29,6 +29,8 @@ F_RESULT_AIKEN = "Проверенный файл"  # тест в формате
 F_RESULT_GIFT = "Файл (Gift) для заливки"  # необязательная колонка: если её нет в базе, файл не пишется
 F_STATUS = "Статус"
 F_REPORT = "Отчёт"
+# Необязательная колонка: заполнена, если тест не нужен или нужно несколько тестов. Такие записи обрабатываются вручную.
+F_EXCEPTION = "Исключения"
 
 # Значения поля «Статус» (тип «Меню» в базе): текст должен совпадать с пунктом меню слово в слово.
 STATUS_NEW = "Не обработан"
@@ -45,7 +47,7 @@ def _norm(name: str) -> str:
 _KNOWN_NAMES = {
     _norm(n): n for n in (
         F_COURSE_NAME, F_COURSE_LINK, F_KIND, F_GROUP, F_TEACHER, F_DEPARTMENT, F_SOURCE,
-        F_RESULT_XML, F_RESULT_AIKEN, F_RESULT_GIFT, F_STATUS, F_REPORT,
+        F_RESULT_XML, F_RESULT_AIKEN, F_RESULT_GIFT, F_STATUS, F_REPORT, F_EXCEPTION,
     )
 }
 
@@ -84,6 +86,11 @@ class RegistryEntry:
     @property
     def status(self) -> str:
         return self.values.get(F_STATUS, "")
+
+    @property
+    def exception(self) -> str:
+        """Текст из колонки «Исключения»; пусто — запись обрабатывается приложением как обычно."""
+        return self.values.get(F_EXCEPTION, "")
 
 
 def _text(content: str | None) -> str:
