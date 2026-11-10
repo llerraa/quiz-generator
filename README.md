@@ -36,7 +36,7 @@
 
 ### Плагин `local_qbankremotemanager` (версия `1.2.0-imes2`)
 
-Тест создаёт и вопросы загружает плагин Moodle (GPL v3, чужой, в репозиторий не входит). Локальные правки:
+Тест создаёт и вопросы загружает плагин Moodle (GPL v3, чужой, изменённая версия лежит в [`moodle-plugin/`](moodle-plugin/) вместе с описанием правок и патчами). Локальные правки:
 `supervisedmode`/`lessontypeid` (для `quizaccess_supervisedcheck`) и `cmidnumber` (идентификационный номер теста).
 Категорию журнала плагин принимает по названию (`gradecat`).
 
@@ -70,6 +70,7 @@ src/exporters/     # Moodle XML, Aiken, GIFT, JSON
 src/llm/           # запросы к BotHub
 src/course_pipeline.py  # отбор до 25 вопросов, отчёт
 src/injection_guard.py  # проверка ответа модели на следы промпт-инъекции
+moodle-plugin/     # плагин local_qbankremotemanager (imes2), CHANGES.md, патчи
 scripts/ tests/ docs/ data/sample/
 ```
 

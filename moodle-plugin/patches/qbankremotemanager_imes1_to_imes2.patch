@@ -1,0 +1,98 @@
+diff -ruN a/qbankremotemanager/classes/external/qbankremotemanager_external.php b/qbankremotemanager/classes/external/qbankremotemanager_external.php
+--- a/qbankremotemanager/classes/external/qbankremotemanager_external.php	2026-11-10 14:05:09.382805435 +0000
++++ b/qbankremotemanager/classes/external/qbankremotemanager_external.php	2026-11-10 14:05:09.385090236 +0000
+@@ -164,6 +164,12 @@
+                     get_string('gradecat_desc', 'local_qbankremotemanager'),
+                     VALUE_OPTIONAL
+                 ),
++                // Local patch (imes2): ID number of the quiz (also the ID number of its gradebook item).
++                'cmidnumber' => new external_value(
++                    PARAM_TEXT,
++                    get_string('cmidnumber_desc', 'local_qbankremotemanager'),
++                    VALUE_OPTIONAL
++                ),
+                 'graceperiod' => new external_value(
+                     PARAM_INT,
+                     get_string('graceperiod_desc', 'local_qbankremotemanager'),
+@@ -527,6 +533,39 @@
+     }
+ 
+     /**
++     * Local patch (imes2): says who holds an ID number in the course (for the "already used" error).
++     *
++     * grade_verify_idnumber() looks both at course modules and at grade items, and the gradebook screen
++     * hides items of modules that are being deleted, so the reason is not always visible in the interface.
++     *
++     * @param string $idnumber ID number
++     * @param int    $courseid course id
++     * @return string short description of course modules and grade items that use the number
++     */
++    private static function describe_idnumber_holders($idnumber, $courseid) {
++        global $DB;
++        $parts = [];
++        $sql = "SELECT cm.id, cm.deletioninprogress, m.name AS modname
++                  FROM {course_modules} cm
++                  JOIN {modules} m ON m.id = cm.module
++                 WHERE cm.course = :courseid AND cm.idnumber = :idnumber";
++        foreach ($DB->get_records_sql($sql, ['courseid' => $courseid, 'idnumber' => $idnumber]) as $cm) {
++            $parts[] = "course module id={$cm->id} ({$cm->modname}, deletioninprogress={$cm->deletioninprogress})";
++        }
++        $items = $DB->get_records(
++            'grade_items',
++            ['courseid' => $courseid, 'idnumber' => $idnumber],
++            '',
++            'id, itemtype, itemmodule, iteminstance, itemname'
++        );
++        foreach ($items as $gi) {
++            $parts[] = "grade item id={$gi->id} ({$gi->itemtype}/{$gi->itemmodule}, instance={$gi->iteminstance}, name="
++                . ($gi->itemname ?? '') . ")";
++        }
++        return $parts ? implode('; ', $parts) : 'not found in course modules or grade items';
++    }
++
++    /**
+      * Quiz ID is returned with the status.
+      * The status can be either "OK" or "ERROR", when error is present you will recieve error message with it.
+      * If everything went fine you will recieve number of imported questions.
+@@ -1193,7 +1232,15 @@
+     // Local patch: quizaccess_supervisedcheck inserts a row into its own table and fails on NULL.
+     $moduleinfo->supervisedmode = (int)($config['supervisedmode'] ?? 0);
+     $moduleinfo->lessontypeid = (int)($config['lessontypeid'] ?? -1);
+-        $moduleinfo->cmidnumber = "";
++        // Local patch (imes2): ID number of the quiz (it is also the ID number of its gradebook item).
++        $cmidnumber = trim(clean_param($config['cmidnumber'] ?? '', PARAM_TEXT));
++        if ($cmidnumber !== '' && !grade_verify_idnumber($cmidnumber, $course->id)) {
++            $a = new stdClass();
++            $a->idnumber = $cmidnumber;
++            $a->holders = self::describe_idnumber_holders($cmidnumber, $course->id);
++            throw new moodle_exception('cmidnumber_taken', 'local_qbankremotemanager', '', $a);
++        }
++        $moduleinfo->cmidnumber = $cmidnumber;
+ 
+         return $moduleinfo;
+     }
+diff -ruN a/qbankremotemanager/lang/en/local_qbankremotemanager.php b/qbankremotemanager/lang/en/local_qbankremotemanager.php
+--- a/qbankremotemanager/lang/en/local_qbankremotemanager.php	2026-11-10 14:05:09.382909303 +0000
++++ b/qbankremotemanager/lang/en/local_qbankremotemanager.php	2026-11-10 14:05:09.385188095 +0000
+@@ -64,6 +64,8 @@
+ $string['generalfeedbackopen_desc'] = 'Review option: Show generalfeedback while quiz is open. If set to -1, system default is used.';
+ $string['graceperiod_desc'] = 'The submission grace period in seconds.';
+ $string['grade_desc'] = 'The maximum grade for the quiz.';
++$string['cmidnumber_desc'] = 'ID number of the quiz (also the ID number of its gradebook item), for example PA. Must be unique in the course.';
++$string['cmidnumber_taken'] = 'The ID number "{$a->idnumber}" is already used in this course. Used by: {$a->holders}.';
+ $string['gradecat_desc'] = 'The name of the grade category. This is Case Sensitive.';
+ $string['grademethod_desc'] = 'The grading method for multiple attempts.';
+ $string['gradepass_desc'] = 'Grade to pass the quiz.';
+diff -ruN a/qbankremotemanager/version.php b/qbankremotemanager/version.php
+--- a/qbankremotemanager/version.php	2026-11-10 14:05:09.382726505 +0000
++++ b/qbankremotemanager/version.php	2026-11-10 14:05:09.385007128 +0000
+@@ -24,7 +24,7 @@
+ defined('MOODLE_INTERNAL') || die();
+ 
+ $plugin->component = 'local_qbankremotemanager';
+-$plugin->version = 2025031311;
++$plugin->version = 2025031315;
+ $plugin->requires = 2022041912;
+ $plugin->maturity = MATURITY_STABLE;
+-$plugin->release = '1.2.0-imes1';
++$plugin->release = '1.2.0-imes2';

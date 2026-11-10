@@ -1,0 +1,55 @@
+diff -ruN a/qbankremotemanager/classes/external/qbankremotemanager_external.php b/qbankremotemanager/classes/external/qbankremotemanager_external.php
+--- a/qbankremotemanager/classes/external/qbankremotemanager_external.php	2026-11-10 14:05:09.369378412 +0000
++++ b/qbankremotemanager/classes/external/qbankremotemanager_external.php	2026-11-10 14:05:09.371569795 +0000
+@@ -424,6 +424,19 @@
+                     VALUE_DEFAULT,
+                     0
+                 ),
++                // Local patch: fields of the third-party quiz access rule quizaccess_supervisedcheck.
++                'supervisedmode' => new external_value(
++                    PARAM_INT,
++                    get_string('supervisedmode_desc', 'local_qbankremotemanager'),
++                    VALUE_DEFAULT,
++                    0
++                ),
++                'lessontypeid' => new external_value(
++                    PARAM_INT,
++                    get_string('lessontypeid_desc', 'local_qbankremotemanager'),
++                    VALUE_DEFAULT,
++                    -1
++                ),
+             ], get_string('config_desc', 'local_qbankremotemanager')),
+             "itemid" => new external_value(PARAM_INT, get_string('itemid_desc', 'local_qbankremotemanager')),
+             'questionbankid' => new external_value(
+@@ -1177,6 +1190,9 @@
+         }
+ 
+         $moduleinfo->seb_requiresafeexambrowser = 0;
++    // Local patch: quizaccess_supervisedcheck inserts a row into its own table and fails on NULL.
++    $moduleinfo->supervisedmode = (int)($config['supervisedmode'] ?? 0);
++    $moduleinfo->lessontypeid = (int)($config['lessontypeid'] ?? -1);
+         $moduleinfo->cmidnumber = "";
+ 
+         return $moduleinfo;
+diff -ruN a/qbankremotemanager/lang/en/local_qbankremotemanager.php b/qbankremotemanager/lang/en/local_qbankremotemanager.php
+--- a/qbankremotemanager/lang/en/local_qbankremotemanager.php	2026-11-10 14:05:09.369254350 +0000
++++ b/qbankremotemanager/lang/en/local_qbankremotemanager.php	2026-11-10 14:05:09.371689892 +0000
+@@ -125,3 +125,5 @@
+ $string['visible_desc'] = 'Visibility of the quiz (1 for show, 0 for hide).';
+ $string['visibleoncoursepage_desc'] = 'Whether the activity is visible on the course page.';
+ $string["shuffle_desc"] = "Whether to shuffle questions when adding them to quiz (1 for yes, 0 for no).";
++$string['supervisedmode_desc'] = 'Local patch. Setting of the quiz access rule quizaccess_supervisedcheck (0 by default). Ignored if that plugin is not installed.';
++$string['lessontypeid_desc'] = 'Local patch. Lesson type for quizaccess_supervisedcheck (-1 by default). Ignored if that plugin is not installed.';
+diff -ruN a/qbankremotemanager/version.php b/qbankremotemanager/version.php
+--- a/qbankremotemanager/version.php	2026-11-10 14:05:09.369170526 +0000
++++ b/qbankremotemanager/version.php	2026-11-10 14:05:09.371472636 +0000
+@@ -24,7 +24,7 @@
+ defined('MOODLE_INTERNAL') || die();
+ 
+ $plugin->component = 'local_qbankremotemanager';
+-$plugin->version = 2025031310;
++$plugin->version = 2025031311;
+ $plugin->requires = 2022041912;
+ $plugin->maturity = MATURITY_STABLE;
+-$plugin->release = '1.2.0';
++$plugin->release = '1.2.0-imes1';
