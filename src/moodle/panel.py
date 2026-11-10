@@ -10,6 +10,7 @@ from src.config import Config
 from src.exporters.aiken_exporter import questions_to_aiken
 from src.exporters.moodle_xml_exporter import questions_to_moodle_xml
 from src.exporters.gift_exporter import questions_to_gift
+from src.injection_guard import flag_injected_questions
 from src.moodle import registry_table as T
 from src.moodle.client import (
     GRADE_CATEGORY_PREFIX, QUIZ_SECTION_NAME, MoodleClient, MoodleError, QuizSettings, pick_grade_category, quiz_title,
@@ -324,7 +325,8 @@ def _create_quiz(client: MoodleClient, course_id: int, category: str, questions,
     if entry is not None and registry is not None:
         try:
             registry.set_status(entry.entry_id, STATUS_QUIZ,
-                                report=make_report(result, usage, len(questions), quiz_url=created["url"]))
+                                report=make_report(result, usage, len(questions), quiz_url=created["url"],
+                                                  flagged=len(flag_injected_questions(questions))))
         except MoodleError as exc:
             st.warning(f"Тест создан, но статус в базе данных не обновился: {exc}")
 
@@ -423,8 +425,27 @@ def render_moodle_panel(
         "Я проверил(а) вопросы и курс" + (" и всё равно загружаю ещё раз" if already else ""),
         key="moodle_confirm",
     )
+    # Вторая линия защиты от промпт-инъекций: подозрительные вопросы нужно прочитать глазами.
+    suspicious = flag_injected_questions(questions)
+    if suspicious:
+        st.error(
+            f"Подозрительных вопросов: {len(suspicious)}. В тексте файла могла быть вставка, обращённая к ИИ. "
+            "Прочитайте их ниже; пока вы не подтвердите проверку, отправка в Moodle заблокирована."
+        )
+        with st.expander("Какие вопросы и почему", expanded=True):
+            for number, problems in suspicious.items():
+                q = questions[number]
+                text = getattr(q, "question", None) or getattr(q, "statement", None) or getattr(q, "instruction", "")
+                short = " ".join(str(text).split())
+                st.markdown(f"**№ {number + 1}.** {html.escape(short[:300])}{'…' if len(short) > 300 else ''}  \n"
+                            f"Причина: {html.escape('; '.join(problems))}")
+        suspicious_ok = st.checkbox(
+            "Я прочитал(а) отмеченные вопросы: в них нет вставок, меняющих смысл теста",
+            key="moodle_suspicious_ok",
+        )
+        confirmed = confirmed and suspicious_ok
 
-    report = make_report(result, usage, len(questions))
+    report = make_report(result, usage, len(questions), flagged=len(suspicious))
     blocked = quiz_blocked_reason(result)  # вопросов меньше нормы: ни в банк, ни в тест не отправляем
     if blocked:
         st.warning(blocked.replace("Тест в курсе не создаётся", "В курс ничего не отправляется"))

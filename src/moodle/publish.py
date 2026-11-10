@@ -51,12 +51,14 @@ class UploadLog:
         self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def make_report(result=None, usage=None, questions_count: int = 0, *, quiz_url: str | None = None) -> str:
+def make_report(result=None, usage=None, questions_count: int = 0, *, quiz_url: str | None = None,
+                flagged: int = 0) -> str:
     """
     Текст для колонки «Отчёт» в реестре.
 
     Расход ИИ в отчёт не пишем (он нужен только тому, кто запускает приложение, и виден на экране).
-    Последняя строка: ссылка на созданный тест (если он создан) или REVIEW_NOTE (по умолчанию пусто).
+    Если проверка нашла подозрительные вопросы (flagged), в отчёте об этом одна строка: тест отправлен
+    только после ручной проверки. Последняя строка: ссылка на созданный тест (если он создан) или REVIEW_NOTE (по умолчанию пусто).
     """
     lines: list[str] = []
     if result is not None:
@@ -67,6 +69,8 @@ def make_report(result=None, usage=None, questions_count: int = 0, *, quiz_url: 
             lines.append(f"Ошибок при разборе фрагментов: {len(result.errors)}.")
     else:
         lines.append(f"Вопросов: {questions_count}.")
+    if flagged:
+        lines.append(f"Вопросов с подозрительным текстом: {flagged}, проверены вручную перед отправкой.")
     if quiz_url:
         lines.append(f"Тест создан в курсе: {quiz_url}")
     elif REVIEW_NOTE:

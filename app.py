@@ -24,6 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 from src.config import Config
 from src.course_pipeline import prepare_course_test
+from src.injection_guard import flag_injected_questions
 from src.exporters.aiken_exporter import count_skipped_for_aiken, questions_to_aiken
 from src.exporters.gift_exporter import questions_to_gift
 from src.exporters.json_exporter import questions_to_json
@@ -1045,6 +1046,15 @@ if st.session_state.get("questions"):
             )
 
     questions_only = [item["question"] for item in items]
+    if not is_course:
+        # В тесте из лекции в Moodle ничего не уходит, но вставку, обращённую к ИИ, всё равно показываем.
+        flagged = flag_injected_questions(questions_only)
+        if flagged:
+            st.error(
+                "Подозрительные вопросы: " + ", ".join(f"№ {n + 1}" for n in flagged)
+                + ". В тексте лекции могла быть вставка, обращённая к ИИ. Прочитайте эти вопросы, "
+                "прежде чем скачивать тест; ненужный можно заменить кнопкой «Перегенерировать»."
+            )
     if is_course:
         file_stem = st.session_state.get("course_source_stem") or "quiz"
         with _step(4, "Отправьте в Moodle", "send"):

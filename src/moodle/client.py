@@ -24,6 +24,32 @@ IMPORT_FUNCTION = "local_questions_importer_ws_import_xml"
 PING_FUNCTION = "local_qbankremotemanager_am_i_here"
 QUIZ_FUNCTION = "local_qbankremotemanager_upload_quiz"
 CATEGORIES_FUNCTION = "local_qbankremotemanager_get_question_categories"
+# --- Предохранители: приложение ничего не меняет в журнале оценок и в настройках курса ---
+# Функции Moodle, которые вообще разрешено вызывать. Всё остальное (в том числе любая функция
+# изменения журнала, курса или пользователей) client.call() отклонит до отправки запроса.
+# Записывающих здесь три: загрузка вопросов, создание теста и обновление записи реестра.
+ALLOWED_FUNCTIONS = frozenset({
+    "core_webservice_get_site_info",
+    "core_course_get_courses_by_field",
+    "core_course_get_contents",
+    "mod_data_get_databases_by_courses",
+    "mod_data_get_fields",
+    "mod_data_get_entries",
+    "mod_data_update_entry",
+    IMPORT_FUNCTION,
+    PING_FUNCTION,
+    QUIZ_FUNCTION,
+    CATEGORIES_FUNCTION,
+})
+# Параметры config для upload_quiz, которые приложение вообще может отправить.
+# Формула категории журнала (appendtogradecalc) сюда НЕ входит: формулы менеджеры правят вручную.
+# Любой другой ключ (в том числе из QuizSettings.extra) приведёт к ошибке до отправки запроса.
+ALLOWED_QUIZ_CONFIG_KEYS = frozenset({
+    "quizname", "courseid", "section", "visible", "attempts", "timelimit", "shuffleanswers",
+    "questionsperpage", "navmethod", "preferredbehaviour", "grademethod", "gradecat", "cmidnumber",
+    "marksimmediately", "marksopen", "marksclosed",
+})
+FORBIDDEN_QUIZ_CONFIG_KEYS = frozenset({"appendtogradecalc"})
 # Название раздела курса, куда кладётся новый тест (в шаблоне курсов ЭИОС оно одинаковое)
 QUIZ_SECTION_NAME = "Промежуточная аттестация"
 # Поле курса «Название дисциплины» (раздел настроек курса «Поля из 1С»): на боевой ЭИОС оно
@@ -40,8 +66,31 @@ def quiz_title(discipline: str | None) -> str:
     return f"{QUIZ_TITLE_PREFIX} по дисциплине {discipline}"[:250] if discipline else QUIZ_TITLE_PREFIX
 
 
+# Коды отказа Moodle, когда функция, служба или токен выключены или нет прав. Так выглядят и «рубильники»
+# администратора (см. docs/DETAILS.md, раздел «Рубильники в Moodle»), поэтому к тексту добавляем пояснение.
+ACCESS_DENIED_CODES = frozenset({
+    "accessexception", "servicenotavailable", "invalidtoken", "webservicesnotenabled", "nopermissions",
+})
+ACCESS_DENIED_HINT = (
+    "\nВозможно, администратор Moodle отключил эту возможность или токен. Повторять попытки не нужно: "
+    "сообщите ответственному за Moodle (код ошибки указан выше)."
+)
+
+
 class MoodleError(Exception):
     """Moodle ответил ошибкой или недоступен. Текст понятен без знания Moodle."""
+
+
+def check_quiz_config(config: dict) -> None:
+    """Не даёт отправить в плагин параметры вне белого списка (в первую очередь формулы журнала)."""
+    bad = sorted(set(config) - ALLOWED_QUIZ_CONFIG_KEYS)
+    if bad:
+        forbidden = sorted(set(bad) & FORBIDDEN_QUIZ_CONFIG_KEYS)
+        raise MoodleError(
+            "Приложение не отправляет в Moodle параметры " + ", ".join(bad)
+            + (": изменение формул журнала запрещено, формулы правят менеджеры вручную." if forbidden
+               else ": их нет в списке разрешённых.")
+        )
 
 
 def _custom_field(record: dict, titles) -> str | None:
@@ -113,6 +162,7 @@ class QuizSettings:
             for when in ("immediately", "open", "closed"):
                 config[f"marks{when}"] = 1
         config.update(self.extra)
+        check_quiz_config(config)
         return config
 
 
@@ -178,6 +228,8 @@ class MoodleClient:
             message = data.get("message") or data.get("error") or "неизвестная ошибка"
             code = data.get("errorcode", "")
             text = f"Moodle вернул ошибку: {message}" + (f" ({code})" if code else "")
+            if code in ACCESS_DENIED_CODES:
+                text += ACCESS_DENIED_HINT
             # Подробности (например, текст ошибки базы данных) Moodle присылает только в режиме отладки
             debug = str(data.get("debuginfo") or "").strip()
             if debug:
@@ -186,7 +238,9 @@ class MoodleClient:
         return data
 
     def call(self, function: str, **params) -> object:
-        """Вызов функции веб-сервиса через REST."""
+        """Вызов функции веб-сервиса через REST (только из списка ALLOWED_FUNCTIONS)."""
+        if function not in ALLOWED_FUNCTIONS:
+            raise MoodleError(f"Приложению не разрешено вызывать функцию Moodle {function}.")
         payload = {
             "wstoken": self.token,
             "wsfunction": function,
@@ -356,6 +410,7 @@ class MoodleClient:
         }
 
     def _upload_quiz(self, config: dict, itemid: int, settings: QuizSettings) -> object:
+        check_quiz_config(config)  # последняя проверка прямо перед отправкой
         params: dict = {f"config[{key}]": value for key, value in config.items()}
         params["itemid"] = itemid
         params["shuffle"] = int(settings.shuffle_questions)
