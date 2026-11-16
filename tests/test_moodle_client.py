@@ -166,7 +166,7 @@ def test_moodle_debuginfo_is_shown_without_token():
 
 def test_quiz_settings_defaults_are_exam_friendly():
     config = QuizSettings(name="Т").to_config(16)
-    assert config["timelimit"] == 40 * 60
+    assert config["timelimit"] == 30 * 60
     assert config["attempts"] == 1
     assert config["questionsperpage"] == 1
     assert config["navmethod"] == "free"

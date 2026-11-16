@@ -117,7 +117,7 @@ class QuizSettings:
     section: int = 0              # номер раздела курса (0 — самый верхний, общий)
     visible: bool = False         # скрытый тест не виден студентам
     attempts: int = 1             # число попыток (0 — без ограничения)
-    time_limit_minutes: int = 40  # время на попытку; 0 — без ограничения
+    time_limit_minutes: int = 30  # время на попытку; 0 — без ограничения
     points_per_question: float = 2  # баллы за вопрос; кладутся в XML (defaultgrade), максимум теста = сумма
     shuffle_answers: bool = True  # перемешивать варианты ответов внутри вопроса
     shuffle_questions: bool = True   # перемешивать порядок вопросов
