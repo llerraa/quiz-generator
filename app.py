@@ -458,12 +458,12 @@ with col_visual:
     st.image("assets/imes_laptop_mockup.png", width="stretch")
 
 # --- Проверка ключа BotHub заранее, а не в момент нажатия кнопки ---
-if not Config.BOTHUB_API_KEY:
-    st.error(
-        "Не найден ключ BotHub. Скопируйте .env.example в .env и укажите "
-        "реальный BOTHUB_API_KEY, затем перезапустите приложение."
-    )
-    st.stop()
+# if not Config.BOTHUB_API_KEY:
+#     st.error(
+#         "Не найден ключ BotHub. Скопируйте .env.example в .env и укажите "
+#         "реальный BOTHUB_API_KEY, затем перезапустите приложение."
+#     )
+#     st.stop()
 
 def _format_number(value: float) -> str:
     return f"{value:,.0f}".replace(",", " ")
@@ -582,6 +582,15 @@ def _analyze_file(file_name: str, data: bytes):
 
 def _prepare_test(file_name: str, loaded, course_is_aiken: bool) -> None:
     """Кнопка «Подготовить тест»: отбор до 25 вопросов из файла преподавателя."""
+    # В режиме реестра работаем только без ИИ
+    if st.session_state.get("_active_mode") == _MODE_REGISTRY:
+        if not course_is_aiken:
+            st.warning(
+                "В режиме реестра обработка ИИ отключена. "
+                "Используйте файл в формате Aiken."
+            )
+            return
+            
     too_long = (not course_is_aiken) and len(loaded.text) > Config.COURSE_MAX_CHARS
     if too_long:
         st.error(
@@ -682,9 +691,38 @@ def _download_buttons(questions_only: list, file_stem: str | None, simple: bool)
 
 
 # --- Переключатель разделов (оранжевая полоса на всю ширину) и описание выбранного раздела ---
+# --- Управление доступностью разделов ---
+ENABLE_FILE_MODE = False
+ENABLE_LECTURE_MODE = False
+
+available_sections = [_SECTION_REGISTRY]
+
+if ENABLE_FILE_MODE:
+    available_sections.append(_SECTION_FILE)
+
+if ENABLE_LECTURE_MODE:
+    available_sections.append(_SECTION_LECTURE)
+
 with st.container(key="mode_switch"):
-    section = st.radio("Раздел", _SECTIONS, horizontal=True, label_visibility="collapsed")
+    section = st.radio(
+        "Раздел",
+        available_sections,
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
 st.markdown(render_mode_description_html(section), unsafe_allow_html=True)
+
+# --- Проверяем ключ только для режимов с ИИ ---
+if section in (_SECTION_FILE, _SECTION_LECTURE):
+    if not Config.BOTHUB_API_KEY:
+        st.error(
+            "Для этого режима необходим ключ BotHub. "
+            "Укажите BOTHUB_API_KEY в файле .env."
+        )
+        st.stop()
+
+
 
 if section == _SECTION_REGISTRY:
     flow = _MODE_REGISTRY
